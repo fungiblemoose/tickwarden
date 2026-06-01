@@ -11,6 +11,7 @@
   },
   "license": "MIT",
   "environment": "server",
+  "accessWidener": "tickwarden-companion.accesswidener",
   "entrypoints": {
     "server": ["com.backspinlabs.tickwarden.companion.TickwardenCompanion"]
   },

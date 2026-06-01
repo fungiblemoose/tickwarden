@@ -1,0 +1,6 @@
+accessWidener	v2	named
+
+# ChunkMap.getChunks() is the only path to enumerate loaded chunk holders, but
+# it's protected. Widen it so the companion can sample per-chunk block-entity
+# counts on the server thread. Read-only use; no game state is mutated.
+accessible	method	net/minecraft/server/level/ChunkMap	getChunks	()Ljava/lang/Iterable;
