@@ -1,19 +1,19 @@
 # tickwarden
 
-Tuning and cross-layer diagnostics for self-hosted Minecraft servers.
+Tuning and lag diagnostics for self-hosted Minecraft servers.
 
-tickwarden tunes a server to the hardware it actually runs on, and looks *below*
-the JVM to explain tick problems that in-game profilers can't see: CPU
-throttling, I/O contention from neighbouring containers, OS/kernel settings, and
-thermal throttling. spark and friends profile the JVM; tickwarden covers the
-layers underneath it.
+tickwarden tunes a server to the hardware it's actually running on. It also
+looks underneath Java itself to explain lag that in-game profilers can't see:
+CPU throttling, slow disk access caused by other containers on the same box, OS
+and kernel settings, and overheating. A profiler like spark tells you what's
+slow inside the game; tickwarden covers the layers below that.
 
-It's a single static Go binary, plus a small optional Fabric mod that reports
-live TPS. It runs in two places:
+It's a single Go binary with nothing to install alongside it, plus an optional
+Fabric mod that reports live TPS. You can run it in two places:
 
-- **inside the server's container** — for tuning, and for correlating TPS with
-  the container's own resource pressure.
-- **on the Proxmox/Docker host** — to identify which container is starving the
+- **Inside the server's container**, to tune the server and to line up TPS drops
+  with the container's own resource pressure.
+- **On the Proxmox or Docker host**, to find which container is starving the
   others.
 
 Prebuilt binaries (Linux amd64/arm64, macOS arm64) and the companion jar are on
@@ -45,9 +45,10 @@ tickwarden tune -apply -write     # apply (after a .bak backup); -revert undoes 
 ```
 
 `tune` labels every recommendation `solid` (trust it), `heuristic` (a sane
-default), or `contested` (validate against your own load). Heap/GC and JVM flags
-are reported, not auto-written; only `server.properties` keys are applied, and a
-`tickwarden.toml` `[lock]` section pins any value you want left alone.
+default), or `contested` (test it against your own load). Java memory and
+startup flags are reported but never written for you. Only `server.properties`
+keys get applied, and a `[lock]` section in `tickwarden.toml` pins any value you
+want left alone.
 
 **In-container observability** (TPS needs the companion mod, below):
 
@@ -60,9 +61,9 @@ tickwarden pregen                                     # Chunky pregen that yield
 tickwarden loadtest                                   # drive a fixed Chunky load while benchmarking
 ```
 
-`bench-diff` marks a comparison inconclusive when host pressure differed between
-the two runs, since then a TPS change may reflect the host rather than your
-change.
+`bench-diff` marks a comparison inconclusive when host pressure was different
+between the two runs, because then a TPS change might be the host's fault rather
+than your change's.
 
 **Host-level** (run on the Proxmox/Docker host):
 
@@ -76,9 +77,10 @@ tickwarden thermal     # CPU temperature / frequency throttling
 ## The companion mod (`companion/`)
 
 `watch`, `bench`, `hotspots`, and `pregen` need the server's real tick health,
-which only exists inside the JVM. spark can't supply it over RCON — its commands
-reply asynchronously and come back empty — so `companion/` is a small Fabric mod
-that times each server tick and serves JSON on a localhost-only endpoint:
+and that number only exists inside the running game. spark can't hand it over
+through RCON (its commands reply asynchronously and come back empty), so
+`companion/` is a small Fabric mod that times each server tick and serves the
+result as JSON on a localhost-only endpoint:
 
 ```sh
 cd companion && ./gradlew build    # needs JDK 21
@@ -93,8 +95,8 @@ It binds `127.0.0.1` only (port `9225`, override with `-Dtickwarden.port=` or
 
 ## How the cross-layer part works
 
-Inside a container you can read your own cgroup-v2 pressure and throttling, so
-you can tell that you were starved without any host access:
+Inside a container you can read your own cgroup-v2 pressure and throttling
+stats, so you can tell you were starved without needing any host access:
 
 ```
 /sys/fs/cgroup/<self>/{cpu,io,memory}.pressure
@@ -102,34 +104,38 @@ you can tell that you were starved without any host access:
 ```
 
 Detecting *that* you were starved covers most of the value and needs no
-privileges. Naming the *cause* — which other container saturated the disk — does
-need a view of the host, which is what `tickwarden host` provides.
+privileges. Naming the *cause*, meaning which other container saturated the
+disk, does need a view of the host. That's what `tickwarden host` provides.
 
-Two things learned running this on a real Proxmox LXC, both now handled in code:
+Two things I learned running this on a real Proxmox LXC, both now handled in
+code:
 
 - **Read PSI up the cgroup chain, not just the leaf.** The workload sits in a
-  `/.lxc` leaf whose own pressure reads ~0; the real pressure shows up at the
-  namespace root one level up. `watch` scans leaf→root and keeps the worst.
+  `/.lxc` leaf whose own pressure reads close to zero. The real pressure shows up
+  one level up, at the namespace root. So `watch` scans from leaf to root and
+  keeps the worst reading.
 - **Host-applied CPU caps are invisible from inside.** A Proxmox `cpulimit` is
-  enforced on a cgroup above the container's namespace ceiling, so the in-container
-  throttle counter reads 0 even at 90%+ throttling. PSI still shows the symptom;
-  `tickwarden host` reads the real number from the host side.
+  enforced on a cgroup above the container's namespace ceiling, so the
+  in-container throttle counter reads 0 even at 90%+ throttling. PSI still shows
+  the symptom, and `tickwarden host` reads the real number from the host side.
 
-## Philosophy: max performance, node-aware
+## What it's tuning for
 
-The goal is the most render and simulation distance the system can sustain at 20
-TPS, not a safe-but-timid default. Distance rules are calibrated to a measured
-ceiling; view distance is pushed for render range (it costs bandwidth and RAM,
-not tick CPU, and is cheap over pregenerated chunks on SSD). The constraint is
-that when you share a host, tickwarden sizes to your cgroup's real budget and
-uses the `host`/`iostorm` view to keep maxing your server from starving the rest
-of the node.
+The goal is to get the most render and simulation distance your system can hold
+at a steady 20 TPS, instead of playing it safe with conservative defaults. The
+distance rules are calibrated to a ceiling that's actually been measured. View
+distance gets pushed hard for render range, since that costs bandwidth and RAM
+rather than tick CPU, and it's cheap once chunks are pregenerated on an SSD. The
+catch is that when you share a host, tickwarden sizes things to your cgroup's
+real budget and uses the `host` and `iostorm` views so that maxing out your
+server doesn't starve everything else on the box.
 
-The rules are honest about their footing. Some are well-established; some are
-heuristics; the lighting-engine choice is openly `contested`. Each carries its
-confidence and the reasoning behind it, and `docs/DECISION_TREE.md` records which
-numbers are backed by a measurement versus extrapolated. `bench`/`bench-diff`
-exist so a contested rule can be settled with data rather than argument.
+The rules are upfront about how solid they are. Some are well established, some
+are educated guesses, and the lighting-engine choice is openly `contested`. Each
+one carries its confidence level and the reasoning behind it, and
+`docs/DECISION_TREE.md` records which numbers come from a real measurement and
+which are extrapolated. `bench` and `bench-diff` exist so a contested rule can
+be settled with data instead of an argument.
 
 ## Roadmap
 
@@ -140,7 +146,7 @@ exist so a contested rule can be settled with data rather than argument.
 | 1 | TPS × cgroup-PSI correlation (`watch`) | done |
 | 1.5 | Benchmark + diff with host-load confound detection (`bench`, `bench-diff`) | done; a built-in load driver beyond `loadtest` is still open |
 | 2 | Host agent: name the noisy neighbour, read host-applied limits (`host`, `iostorm`) | done |
-| below-JVM | OS/kernel (`ostune`), thermal, mod intelligence, lag-by-location (`hotspots`), host-aware pregen | done |
+| below-Java | OS/kernel (`ostune`), thermal, mod intelligence, lag-by-location (`hotspots`), host-aware pregen | done |
 | 3 | Adaptive tuning: scale distances live with players/headroom | not started (risky; needs headroom to give back) |
 
 ## License
