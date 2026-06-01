@@ -121,8 +121,14 @@ a later tier that does.
 | **0.5** | **Apply** recommendations to server.properties, with per-setting override | ✅ functional (`tune -apply`/`-write`/`-revert` + `tickwarden.toml` locks) |
 | **1** | In-container observability: TPS ⨯ PSI correlation (`watch`) | ✅ functional — real PSI (chain-walked) + real TPS via the companion mod |
 | **1.5** | Benchmark harness to *validate* tuning rules instead of trusting folklore | ✅ `bench` + `bench-diff` (with host-load confound detection); ⬜ still want a built-in controlled-load driver |
-| **2** | Host-side agent mapping cgroup → process, to *name* the noisy neighbor and read host-applied limits | ⬜ planned (fragments across LXC/Docker/bare-metal) |
+| **2** | Host-side agent (`host`) mapping cgroup → process to *name* the noisy neighbor + read host-applied limits | ✅ functional — validated on Proxmox: reads CT throttling invisible from inside, ranks containers, names culprits |
 | **3** | Closed loop: auto back off view-distance / Chunky rate *while* starved | ⬜ aspirational (and genuinely risky) |
+
+Also shipped: **mod auto-detection** (`tune -mods-dir` scans your `mods/` and sets perf-mod assumptions from what's installed), **player-spread awareness** (`tune -clustered`), a **controlled-load driver** (`loadtest` drives a reproducible Chunky burst over RCON while benchmarking), and **CI + release automation** (`.github/workflows/`).
+
+### Philosophy: max performance, node-aware
+
+tickwarden's job is to get the **most** render and simulation distance your system can actually sustain at 20 TPS — not to play it safe. The distance rules are calibrated to the validated ceiling, view distance is pushed hard for render range (it's cheap, especially on SSD), and the lighting/thread/heap choices aim high. The one hard constraint: when you're in a container sharing a host, it sizes to *your* cgroup's real budget and uses the `host` agent to make sure maxing your server doesn't starve the rest of the node. Aggressive within your slice; respectful of the neighbors.
 
 The honest hard part is **Tier 1.5**: without a repeatable load you can't know if
 a tuning change helped, so the rules stay folklore. With it, tickwarden has a

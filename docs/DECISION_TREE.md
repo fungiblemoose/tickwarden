@@ -193,7 +193,8 @@ Validated data points so far:
 
 | Date | Rule | Anchor measurement | Source |
 |---|---|---|---|
-| 2026-05-31 | distances `budgetPerCore=64` | 3 eff. cores, 2 players, perf mods → sim-10 holds 20 TPS (median tick ~7ms, max spike 61–67ms) | spark on the reference Proxmox LXC |
+| 2026-05-31 | distances `budgetPerCore=64` (the MAX sustainable, not a safe default) | 3 eff. cores, 2 players, perf mods → sim-10 holds 20 TPS (median tick ~7ms, max spike 61–67ms); tune now reproduces the operator's hand-validated view-20/sim-10 | spark on the reference Proxmox LXC |
+| 2026-05-31 | view distance maxed for render (sim+10, cap 24 on SSD; sim+6, cap 16 otherwise) | operator runs view-20 on SSD at 1–2 players with no tick cost (view = bandwidth/RAM, not tick CPU) | reference server live config |
 | 2026-05-31 | perf-mod multiplier (~2×) | same box: max tick 145–288ms *before* C2ME/ScalableLux → 61–67ms *after* (~4× on the tail; budget bumped ~2× conservatively) | spark before/after |
 | 2026-05-31 | GC = G1+Aikar < 12 GiB | reference server runs Aikar G1 flags at 4 GiB heap, no TPS-visible pauses | live config |
 

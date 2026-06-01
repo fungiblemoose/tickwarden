@@ -21,6 +21,8 @@ import (
 
 	"github.com/fungiblemoose/tickwarden/internal/apply"
 	"github.com/fungiblemoose/tickwarden/internal/detect"
+	"github.com/fungiblemoose/tickwarden/internal/hostagent"
+	"github.com/fungiblemoose/tickwarden/internal/loadgen"
 	"github.com/fungiblemoose/tickwarden/internal/observe"
 	"github.com/fungiblemoose/tickwarden/internal/tune"
 )
@@ -43,6 +45,10 @@ func main() {
 		cmdBench(os.Args[2:])
 	case "bench-diff":
 		cmdBenchDiff(os.Args[2:])
+	case "host":
+		cmdHost(os.Args[2:])
+	case "loadtest":
+		cmdLoadtest(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("tickwarden", version)
 	case "help", "-h", "--help":
@@ -63,6 +69,8 @@ Usage:
   tickwarden watch  [flags]        correlate TPS dips with host starvation
   tickwarden bench  [flags]        measure a window: TPS/MSPT + pressure stats
   tickwarden bench-diff A.json B.json   compare two bench runs (before/after a change)
+  tickwarden host   [flags]        name the noisy neighbor (run ON the Proxmox host)
+  tickwarden loadtest [flags]      drive a reproducible Chunky load while benchmarking
   tickwarden version
 
 Run a command with -h for its flags.
@@ -106,6 +114,8 @@ func cmdTune(args []string) {
 	players := fs.Int("players", tune.DefaultOptions().Players, "expected PEAK concurrent players to size distances for")
 	perfMods := fs.Bool("perf-mods", tune.DefaultOptions().PerfMods, "chunk-system perf mods (C2ME/ScalableLux) installed")
 	playersURL := fs.String("players-url", "", "companion endpoint to read the OBSERVED peak player count from (overrides -players)")
+	modsDir := fs.String("mods-dir", "", "scan this server mods/ dir to auto-set -perf-mods from installed mods")
+	clustered := fs.Bool("clustered", false, "players congregate (shared base/hub) rather than scatter — allows a higher sim distance")
 	fs.Parse(args)
 
 	if *revert {
@@ -117,7 +127,16 @@ func cmdTune(args []string) {
 		return
 	}
 
-	opts := tune.Options{Players: *players, PerfMods: *perfMods}
+	opts := tune.Options{Players: *players, PerfMods: *perfMods, Clustered: *clustered}
+	if *modsDir != "" {
+		mods, err := detect.ScanMods(*modsDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scanning mods dir %s: %v\n", *modsDir, err)
+			os.Exit(1)
+		}
+		opts.PerfMods = mods.HasChunkPerfMods()
+		fmt.Fprintf(os.Stderr, "detected mods: %s (chunk-perf mods: %v)\n", strings.Join(mods.Names(), ", "), opts.PerfMods)
+	}
 	if *playersURL != "" {
 		if peak, err := observe.FetchPlayerPeak(*playersURL); err != nil {
 			fmt.Fprintf(os.Stderr, "couldn't read peak players from %s (%v); falling back to -players %d\n", *playersURL, err, *players)
@@ -284,6 +303,11 @@ func cmdBench(args []string) {
 		printJSON(stats)
 		return
 	}
+	printBenchStats(stats)
+	fmt.Printf("\nTo compare a tuning change, run this again with the SAME load + a new -label, and diff the two.\n")
+}
+
+func printBenchStats(stats observe.BenchStats) {
 	fmt.Printf("\nBenchmark%s — %d samples over %s\n", labelSuffix(stats.Label), stats.Samples, stats.Duration)
 	fmt.Printf("  TPS:            min %.1f · mean %.2f\n", stats.TPSMin, stats.TPSMean)
 	fmt.Printf("  MSPT:           mean %.2f · p95 %.2f · max %.2f ms\n", stats.MSPTMean, stats.MSPTP95, stats.MSPTMax)
@@ -298,7 +322,85 @@ func cmdBench(args []string) {
 		}
 	}
 	fmt.Println()
-	fmt.Printf("\nTo compare a tuning change, run this again with the SAME load + a new -label, and diff the two.\n")
+}
+
+func cmdHost(args []string) {
+	fs := flag.NewFlagSet("host", flag.ExitOnError)
+	interval := fs.Duration("interval", time.Second, "delta sampling window")
+	root := fs.String("root", "/sys/fs/cgroup/lxc", "cgroup root to scan (numeric subdirs = LXC CTIDs)")
+	asJSON := fs.Bool("json", false, "emit ranked []CgroupLoad as JSON")
+	fs.Parse(args)
+
+	loads, err := hostagent.Sample(hostagent.Config{ScanRoot: *root, Interval: *interval})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "host scan failed (%v)\nRun this ON the Proxmox host as root (it reads %s).\n", err, *root)
+		os.Exit(1)
+	}
+	if *asJSON {
+		printJSON(hostagent.Rank(loads))
+		return
+	}
+	fmt.Print(hostagent.Report(loads))
+}
+
+func cmdLoadtest(args []string) {
+	fs := flag.NewFlagSet("loadtest", flag.ExitOnError)
+	rconAddr := fs.String("rcon-addr", "127.0.0.1:25575", "RCON address of the target server")
+	tpsURL := fs.String("tps-url", "http://127.0.0.1:9225/tps", "companion TPS endpoint to sample")
+	world := fs.String("world", "minecraft:overworld", "world to pregen")
+	cx := fs.Int("center-x", 100000, "Chunky center X — pick FAR/unexplored terrain to force real generation")
+	cz := fs.Int("center-z", 100000, "Chunky center Z")
+	radius := fs.Int("radius-chunks", 16, "Chunky pregen radius in chunks")
+	duration := fs.Duration("duration", 30*time.Second, "measurement + load window")
+	interval := fs.Duration("interval", time.Second, "bench sampling interval")
+	label := fs.String("label", "", "label for this run")
+	out := fs.String("out", "", "write the bench stats JSON here (for bench-diff)")
+	fs.Parse(args)
+
+	// Read the RCON password from the environment, never a flag: process args are
+	// world-readable (`ps`), and leaking a server credential there is exactly the
+	// kind of plaintext-secret mistake to avoid.
+	pw := os.Getenv("TICKWARDEN_RCON_PASSWORD")
+	if pw == "" {
+		fmt.Fprintln(os.Stderr, "set TICKWARDEN_RCON_PASSWORD in the environment (not a flag — argv is world-readable)")
+		os.Exit(2)
+	}
+	client, err := loadgen.Dial(*rconAddr, pw, 5*time.Second)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rcon dial failed:", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	// Drive the controlled load concurrently so generation spans the whole
+	// measurement window (with a small margin on each end).
+	loadErr := make(chan error, 1)
+	go func() {
+		loadErr <- loadgen.ChunkyBurst(client, *world, *cx, *cz, *radius, *duration+2*time.Second)
+	}()
+
+	reader := observe.NewSparkHTTPReader(*tpsURL)
+	count := int(*duration / *interval)
+	if count < 1 {
+		count = 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Fprintf(os.Stderr, "loadtest: Chunky burst at (%d,%d) r=%d chunks while sampling %d×%s\n", *cx, *cz, *radius, count, *interval)
+
+	stats, _ := observe.Bench(ctx, reader, observe.DefaultThresholds(), *interval, count, *label, time.Now)
+	if err := <-loadErr; err != nil {
+		fmt.Fprintln(os.Stderr, "load driver warning:", err)
+	}
+	if *out != "" {
+		if err := writeJSONFile(*out, stats); err != nil {
+			fmt.Fprintln(os.Stderr, "writing -out:", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "saved stats to %s\n", *out)
+		}
+	}
+	printBenchStats(stats)
+	fmt.Printf("\nFor an A/B: change ONE setting, restart, then re-run — but advance -center-x/-center-z by >2× radius onto\nvirgin terrain, or you'll measure cheap disk reloads instead of generation. Then `bench-diff` the two -out files.\n")
 }
 
 func cmdBenchDiff(args []string) {

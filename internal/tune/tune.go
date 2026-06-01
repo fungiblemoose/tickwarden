@@ -126,9 +126,10 @@ func Recommend(p detect.Profile, opts Options) Plan {
 	// AI scale with it); view distance is comparatively cheap (just sending
 	// chunks). Keep sim < view.
 	cores := p.EffectiveCores
-	view, sim := distancesFor(cores, opts.Players, opts.PerfMods, opts.Clustered)
+	ssd := p.StorageRotational != nil && !*p.StorageRotational
+	view, sim := distancesFor(cores, opts.Players, opts.PerfMods, opts.Clustered, ssd)
 	add("view-distance", fmt.Sprintf("%d", view),
-		"view distance is mostly bandwidth + chunk sends, not CPU (cheaper still over pregenerated chunks); can sit a few above sim for visual range", Heuristic, TargetProperties)
+		"maxed for render range — view distance costs bandwidth + RAM, not tick CPU (cheap disk loads over pregenerated chunks on SSD); pushed well above sim", Heuristic, TargetProperties)
 	add("simulation-distance", fmt.Sprintf("%d", sim),
 		fmt.Sprintf("sized for %s%d peak players on %.1f cores%s%s: per-tick cost scales with players × sim², so safe sim ∝ sqrt(budget/players); validate with `bench`",
 			autoTag(opts.PlayersAuto), opts.Players, cores, perfModsTag(opts.PerfMods), clusteredTag(opts.Clustered)),
@@ -226,7 +227,7 @@ func heapForBudget(budget uint64) uint64 {
 // is gated so that the default (spread) path is byte-identical to that anchor.
 // Re-derive this constant if `bench` ever contradicts it; see
 // docs/DECISION_TREE.md.
-func distancesFor(cores float64, players int, perfMods, clustered bool) (view, sim int) {
+func distancesFor(cores float64, players int, perfMods, clustered, ssd bool) (view, sim int) {
 	if players < 1 {
 		players = 1
 	}
@@ -244,9 +245,16 @@ func distancesFor(cores float64, players int, perfMods, clustered bool) (view, s
 		}
 	}
 	sim = clampInt(int(math.Round(math.Sqrt(budgetPerCore*cores/float64(effPlayers)))), 5, 16)
-	// View distance is mostly bandwidth + chunk sends (and cheap disk loads over
-	// pregenerated chunks), so it can sit above sim for visual range.
-	view = clampInt(sim+4, 8, 20)
+	// View distance is cheap on CPU (chunk sends, not ticking) — and cheaper
+	// still over pregenerated chunks on SSD, where it's just disk loads. The
+	// philosophy is MAX render: push view well above sim. The real ceiling is
+	// RAM (each extra ring of chunks costs memory), so we keep a sane cap rather
+	// than going to vanilla's 32; SSD earns a higher cap because loads are cheap.
+	viewBonus, viewCap := 6, 16
+	if ssd {
+		viewBonus, viewCap = 10, 24
+	}
+	view = clampInt(sim+viewBonus, 8, viewCap)
 	return view, sim
 }
 
