@@ -63,6 +63,14 @@ type Options struct {
 	// PlayersAuto records that Players came from a live measurement (the
 	// companion's observed peak) rather than a guess, for the reason string.
 	PlayersAuto bool
+	// Clustered says the playerbase tends to congregate (a shared base, a hub,
+	// an event) rather than scatter to explore. Spread-out players each tick
+	// their own disjoint area, so cost scales with the full player count; a
+	// cluster overlaps — their loaded/simulated chunks coincide — so the server
+	// effectively ticks fewer independent areas and can afford a higher sim
+	// distance. Default false is the CONSERVATIVE assumption (size for spread);
+	// set it only when you know the social shape of your server.
+	Clustered bool
 }
 
 // DefaultOptions assumes a small friends-server with perf mods — the common
@@ -118,12 +126,12 @@ func Recommend(p detect.Profile, opts Options) Plan {
 	// AI scale with it); view distance is comparatively cheap (just sending
 	// chunks). Keep sim < view.
 	cores := p.EffectiveCores
-	view, sim := distancesFor(cores, opts.Players, opts.PerfMods)
+	view, sim := distancesFor(cores, opts.Players, opts.PerfMods, opts.Clustered)
 	add("view-distance", fmt.Sprintf("%d", view),
 		"view distance is mostly bandwidth + chunk sends, not CPU (cheaper still over pregenerated chunks); can sit a few above sim for visual range", Heuristic, TargetProperties)
 	add("simulation-distance", fmt.Sprintf("%d", sim),
-		fmt.Sprintf("sized for %s%d peak players on %.1f cores%s: per-tick cost scales with players × sim², so safe sim ∝ sqrt(budget/players); validate with `bench`",
-			autoTag(opts.PlayersAuto), opts.Players, cores, perfModsTag(opts.PerfMods)),
+		fmt.Sprintf("sized for %s%d peak players on %.1f cores%s%s: per-tick cost scales with players × sim², so safe sim ∝ sqrt(budget/players); validate with `bench`",
+			autoTag(opts.PlayersAuto), opts.Players, cores, perfModsTag(opts.PerfMods), clusteredTag(opts.Clustered)),
 		Solid, TargetProperties)
 
 	// --- Chunk system parallelism (C2ME) -------------------------------------
@@ -204,11 +212,21 @@ func heapForBudget(budget uint64) uint64 {
 // when chunk-system perf mods (C2ME et al.) move generation off the main tick
 // thread.
 //
+// PLAYER SPREAD: the players term assumes every player ticks a DISJOINT area
+// (the spread-out, exploring case — the worst case for the tick loop). When the
+// caller knows players congregate, their simulated areas overlap and the server
+// ticks fewer independent regions, so we size against an EFFECTIVE player count
+// of ceil(players/2) — a deliberately conservative "half overlap" factor (not
+// zero: a cluster still has edges and stragglers). A lower effective count
+// raises sqrt(budget/players) and therefore the recommended sim distance.
+//
 // CALIBRATION ANCHOR: budgetPerCore=64 is set so 3 effective cores / 2 peak
 // players / perf-mods yields sim≈10 — a real, spark-validated data point on the
-// reference server that holds 20 TPS (median tick ~7ms). Re-derive this
-// constant if `bench` ever contradicts it; see docs/DECISION_TREE.md.
-func distancesFor(cores float64, players int, perfMods bool) (view, sim int) {
+// reference server that holds 20 TPS (median tick ~7ms). The clustered factor
+// is gated so that the default (spread) path is byte-identical to that anchor.
+// Re-derive this constant if `bench` ever contradicts it; see
+// docs/DECISION_TREE.md.
+func distancesFor(cores float64, players int, perfMods, clustered bool) (view, sim int) {
 	if players < 1 {
 		players = 1
 	}
@@ -216,7 +234,16 @@ func distancesFor(cores float64, players int, perfMods bool) (view, sim int) {
 	if !perfMods {
 		budgetPerCore = 32.0 // vanilla gen hits the main thread; ~halve the budget
 	}
-	sim = clampInt(int(math.Round(math.Sqrt(budgetPerCore*cores/float64(players)))), 5, 16)
+	effPlayers := players
+	if clustered {
+		// Half-overlap: a clustered group costs about half its head count in
+		// independent ticking areas. max(1,...) keeps the divisor sane.
+		effPlayers = (players + 1) / 2
+		if effPlayers < 1 {
+			effPlayers = 1
+		}
+	}
+	sim = clampInt(int(math.Round(math.Sqrt(budgetPerCore*cores/float64(effPlayers)))), 5, 16)
 	// View distance is mostly bandwidth + chunk sends (and cheap disk loads over
 	// pregenerated chunks), so it can sit above sim for visual range.
 	view = clampInt(sim+4, 8, 20)
@@ -245,4 +272,11 @@ func perfModsTag(perfMods bool) string {
 		return " (with perf mods)"
 	}
 	return " (no perf mods)"
+}
+
+func clusteredTag(clustered bool) string {
+	if clustered {
+		return ", assuming clustered play (sized for ~half as many independent areas)"
+	}
+	return ""
 }
