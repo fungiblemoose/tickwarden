@@ -124,7 +124,22 @@ a later tier that does.
 | **2** | Host-side agent (`host`) mapping cgroup → process to *name* the noisy neighbor + read host-applied limits | ✅ functional — validated on Proxmox: reads CT throttling invisible from inside, ranks containers, names culprits |
 | **3** | Closed loop: auto back off view-distance / Chunky rate *while* starved | ⬜ aspirational (and genuinely risky) |
 
-Also shipped: **mod auto-detection** (`tune -mods-dir` scans your `mods/` and sets perf-mod assumptions from what's installed), **player-spread awareness** (`tune -clustered`), a **controlled-load driver** (`loadtest` drives a reproducible Chunky burst over RCON while benchmarking), and **CI + release automation** (`.github/workflows/`).
+Also shipped: **mod auto-detection + advice** (`tune -mods-dir` scans your `mods/`, sets perf-mod assumptions, and flags conflicts / suggests missing mods), **player-spread awareness** (`tune -clustered`), a **controlled-load driver** (`loadtest`), and **CI + release automation**.
+
+### Below the JVM — the layer nobody else tools
+
+Every other Minecraft optimizer lives inside the JVM or the mod list. tickwarden's edge is looking *under* it, where real latency hides:
+
+```sh
+tickwarden ostune          # CPU governor, swappiness, THP, I/O scheduler — with the exact fix
+tickwarden thermal         # is the CPU thermal/frequency throttling? (spark can't see this)
+tickwarden host            # rank containers, name the noisy neighbor (run on the Proxmox host)
+tickwarden iostorm         # detect a write-storm starving the server + advise a cgroup throttle
+tickwarden hotspots        # top loaded chunks by block-entity count — lag mapped to a LOCATION
+tickwarden pregen          # host-load-aware Chunky: pauses the instant players join or TPS dips
+```
+
+`ostune` alone found a real win on the reference host (`vm.swappiness 60 → 1`: default swappiness lets the kernel page out cold JVM heap → tens-of-ms tick freezes). These are read-only to detect; you apply (or don't).
 
 ### Philosophy: max performance, node-aware
 

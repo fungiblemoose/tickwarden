@@ -81,6 +81,30 @@ func FetchPlayerPeak(url string) (int, error) {
 	return *payload.PlayersPeak, nil
 }
 
+// FetchPlayers reads the companion's CURRENT online player count (not the peak).
+// The pregen controller uses it to pause generation the moment anyone joins.
+func FetchPlayers(url string) (int, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("endpoint returned %d", resp.StatusCode)
+	}
+	var payload struct {
+		Players *int `json:"players"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return 0, err
+	}
+	if payload.Players == nil {
+		return 0, fmt.Errorf("endpoint did not report players (update the companion mod)")
+	}
+	return *payload.Players, nil
+}
+
 // StubReader reports a flat healthy 20 TPS. Useful for exercising the watch
 // loop and PSI correlation without a live server wired up.
 type StubReader struct{}

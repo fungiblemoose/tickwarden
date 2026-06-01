@@ -22,8 +22,13 @@ import (
 	"github.com/fungiblemoose/tickwarden/internal/apply"
 	"github.com/fungiblemoose/tickwarden/internal/detect"
 	"github.com/fungiblemoose/tickwarden/internal/hostagent"
+	"github.com/fungiblemoose/tickwarden/internal/hotspots"
+	"github.com/fungiblemoose/tickwarden/internal/iostorm"
 	"github.com/fungiblemoose/tickwarden/internal/loadgen"
 	"github.com/fungiblemoose/tickwarden/internal/observe"
+	"github.com/fungiblemoose/tickwarden/internal/ostune"
+	"github.com/fungiblemoose/tickwarden/internal/pregen"
+	"github.com/fungiblemoose/tickwarden/internal/thermal"
 	"github.com/fungiblemoose/tickwarden/internal/tune"
 )
 
@@ -47,8 +52,18 @@ func main() {
 		cmdBenchDiff(os.Args[2:])
 	case "host":
 		cmdHost(os.Args[2:])
+	case "iostorm":
+		cmdIOStorm(os.Args[2:])
 	case "loadtest":
 		cmdLoadtest(os.Args[2:])
+	case "ostune":
+		cmdOstune(os.Args[2:])
+	case "thermal":
+		cmdThermal(os.Args[2:])
+	case "hotspots":
+		cmdHotspots(os.Args[2:])
+	case "pregen":
+		cmdPregen(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("tickwarden", version)
 	case "help", "-h", "--help":
@@ -70,6 +85,11 @@ Usage:
   tickwarden bench  [flags]        measure a window: TPS/MSPT + pressure stats
   tickwarden bench-diff A.json B.json   compare two bench runs (before/after a change)
   tickwarden host   [flags]        name the noisy neighbor (run ON the Proxmox host)
+  tickwarden iostorm [flags]       detect an I/O storm + advise a throttle (on the host)
+  tickwarden ostune [flags]        OS/kernel latency knobs: governor, swappiness, THP, I/O sched
+  tickwarden thermal [flags]       CPU thermal / frequency-throttle check
+  tickwarden hotspots [flags]      top loaded chunks by block-entity count (lag by location)
+  tickwarden pregen [flags]        host-load-aware Chunky pregen (pauses when busy/players on)
   tickwarden loadtest [flags]      drive a reproducible Chunky load while benchmarking
   tickwarden version
 
@@ -136,6 +156,22 @@ func cmdTune(args []string) {
 		}
 		opts.PerfMods = mods.HasChunkPerfMods()
 		fmt.Fprintf(os.Stderr, "detected mods: %s (chunk-perf mods: %v)\n", strings.Join(mods.Names(), ", "), opts.PerfMods)
+		adv := detect.Advise(mods)
+		if !adv.Empty() {
+			fmt.Fprintln(os.Stderr, "mod advice:")
+			for _, c := range adv.Conflicts {
+				fmt.Fprintf(os.Stderr, "  ⚠ conflict: %s\n", c)
+			}
+			for _, r := range adv.Redundant {
+				fmt.Fprintf(os.Stderr, "  · redundant: %s\n", r)
+			}
+			for _, s := range adv.Suggestions {
+				fmt.Fprintf(os.Stderr, "  + suggest:  %s\n", s)
+			}
+			for _, n := range adv.Notes {
+				fmt.Fprintf(os.Stderr, "  i note:     %s\n", n)
+			}
+		}
 	}
 	if *playersURL != "" {
 		if peak, err := observe.FetchPlayerPeak(*playersURL); err != nil {
@@ -461,6 +497,161 @@ func labelSuffix(s string) string {
 		return ""
 	}
 	return " [" + s + "]"
+}
+
+func cmdIOStorm(args []string) {
+	fs := flag.NewFlagSet("iostorm", flag.ExitOnError)
+	interval := fs.Duration("interval", time.Second, "delta sampling window")
+	root := fs.String("root", "/sys/fs/cgroup/lxc", "cgroup root to scan (numeric subdirs = LXC CTIDs)")
+	asJSON := fs.Bool("json", false, "emit detected storms as JSON")
+	fs.Parse(args)
+
+	loads, err := hostagent.Sample(hostagent.Config{ScanRoot: *root, Interval: *interval})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "host scan failed (%v)\nRun this ON the Proxmox host as root (it reads %s).\n", err, *root)
+		os.Exit(1)
+	}
+	storms := iostorm.Detect(loads)
+	if *asJSON {
+		printJSON(storms)
+		return
+	}
+	fmt.Print(iostorm.Report(storms))
+}
+
+func cmdOstune(args []string) {
+	fs := flag.NewFlagSet("ostune", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "emit findings as JSON")
+	fs.Parse(args)
+
+	findings, err := ostune.Scan(ostune.DefaultConfig())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ostune scan failed:", err)
+		os.Exit(1)
+	}
+	if *asJSON {
+		printJSON(findings)
+		return
+	}
+	fmt.Print(ostune.Report(findings))
+}
+
+func cmdThermal(args []string) {
+	fs := flag.NewFlagSet("thermal", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "emit the thermal reading as JSON")
+	fs.Parse(args)
+
+	t, err := thermal.Read(thermal.Config{})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "thermal read failed:", err)
+		os.Exit(1)
+	}
+	if *asJSON {
+		printJSON(t)
+		return
+	}
+	fmt.Println(t.Verdict())
+	for _, z := range t.Zones {
+		fmt.Printf("  %-18s %.1f°C\n", z.Label, z.Celsius)
+	}
+	if t.MaxFreqMHz > 0 {
+		fmt.Printf("  clock: %.0f / %.0f MHz (%.0f%% of max)\n", t.CurFreqMHz, t.MaxFreqMHz, t.FreqCappedPct)
+	}
+	for _, n := range t.Notes {
+		fmt.Printf("  • %s\n", n)
+	}
+	if t.Throttling {
+		os.Exit(1) // alert-friendly
+	}
+}
+
+func cmdHotspots(args []string) {
+	fs := flag.NewFlagSet("hotspots", flag.ExitOnError)
+	url := fs.String("url", "http://127.0.0.1:9225/hotspots", "companion /hotspots endpoint")
+	asJSON := fs.Bool("json", false, "emit the hotspots as JSON")
+	fs.Parse(args)
+
+	hs, err := hotspots.Fetch(*url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hotspots fetch failed (%v)\nNeeds the companion mod >= 0.2.0 running on the server.\n", err)
+		os.Exit(1)
+	}
+	if *asJSON {
+		printJSON(hs)
+		return
+	}
+	fmt.Print(hotspots.Report(hs))
+}
+
+// psiHeadroom adapts cgroup PSI to the pregen controller's LoadSampler: the box
+// has headroom unless its own CPU or I/O is already under meaningful stall.
+type psiHeadroom struct{ cpuMax, ioMax float64 }
+
+func (h psiHeadroom) Headroom() (bool, string) {
+	p := observe.ReadPressure()
+	if !p.Available {
+		return false, "cgroup PSI unavailable — staying paused to be safe"
+	}
+	if p.CPU.SomeAvg10 > h.cpuMax {
+		return false, fmt.Sprintf("CPU pressure %.1f%% > %.1f%%", p.CPU.SomeAvg10, h.cpuMax)
+	}
+	if p.IO.SomeAvg10 > h.ioMax {
+		return false, fmt.Sprintf("I/O pressure %.1f%% > %.1f%%", p.IO.SomeAvg10, h.ioMax)
+	}
+	return true, "idle"
+}
+
+type playersFromURL string
+
+func (u playersFromURL) Online() (int, error) { return observe.FetchPlayers(string(u)) }
+
+func cmdPregen(args []string) {
+	fs := flag.NewFlagSet("pregen", flag.ExitOnError)
+	rconAddr := fs.String("rcon-addr", "127.0.0.1:25575", "RCON address of the target server")
+	tpsURL := fs.String("tps-url", "http://127.0.0.1:9225/tps", "companion endpoint (players + TPS)")
+	poll := fs.Duration("poll", 20*time.Second, "decision interval")
+	floor := fs.Float64("tps-floor", 19.0, "pause pregen if TPS drops below this")
+	cpuMax := fs.Float64("cpu-pressure-max", 25.0, "pause pregen if CPU PSI some-avg10 exceeds this")
+	ioMax := fs.Float64("io-pressure-max", 15.0, "pause pregen if I/O PSI some-avg10 exceeds this")
+	fs.Parse(args)
+
+	pw := os.Getenv("TICKWARDEN_RCON_PASSWORD")
+	if pw == "" {
+		fmt.Fprintln(os.Stderr, "set TICKWARDEN_RCON_PASSWORD in the environment (not a flag — argv is world-readable)")
+		os.Exit(2)
+	}
+	client, err := loadgen.Dial(*rconAddr, pw, 5*time.Second)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rcon dial failed:", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	reader := observe.NewSparkHTTPReader(*tpsURL)
+	ctrl := &pregen.Controller{
+		Cmd:      client,
+		Load:     psiHeadroom{cpuMax: *cpuMax, ioMax: *ioMax},
+		Players:  playersFromURL(*tpsURL),
+		TPS:      func() (float64, error) { tps, _, e := reader.Read(); return tps, e },
+		TPSFloor: *floor,
+		Poll:     *poll,
+		OnStep: func(action string, err error) {
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "pregen step error:", err)
+				return
+			}
+			if action != pregen.ActionHold {
+				fmt.Printf("%s  chunky %s\n", time.Now().Format("15:04:05"), action)
+			}
+		},
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Fprintf(os.Stderr, "pregen controller: resumes Chunky only when empty + TPS>=%.1f + low pressure; pauses otherwise. ctrl-c to stop.\n", *floor)
+	fmt.Fprintln(os.Stderr, "(a Chunky task must already exist — `chunky world ... && chunky start` once — this only pause/continues it)")
+	if err := ctrl.Run(ctx); err != nil && err != context.Canceled {
+		fmt.Fprintln(os.Stderr, "pregen stopped:", err)
+	}
 }
 
 func printJSON(v any) {
