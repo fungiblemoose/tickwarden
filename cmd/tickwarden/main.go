@@ -103,6 +103,9 @@ func cmdTune(args []string) {
 	revert := fs.Bool("revert", false, "restore server.properties from its .bak backup")
 	props := fs.String("properties", "server.properties", "path to server.properties")
 	cfg := fs.String("config", "tickwarden.toml", "path to lock config (keys you want left alone)")
+	players := fs.Int("players", tune.DefaultOptions().Players, "expected PEAK concurrent players to size distances for")
+	perfMods := fs.Bool("perf-mods", tune.DefaultOptions().PerfMods, "chunk-system perf mods (C2ME/ScalableLux) installed")
+	playersURL := fs.String("players-url", "", "companion endpoint to read the OBSERVED peak player count from (overrides -players)")
 	fs.Parse(args)
 
 	if *revert {
@@ -114,7 +117,20 @@ func cmdTune(args []string) {
 		return
 	}
 
-	plan := tune.Recommend(detect.Detect())
+	opts := tune.Options{Players: *players, PerfMods: *perfMods}
+	if *playersURL != "" {
+		if peak, err := observe.FetchPlayerPeak(*playersURL); err != nil {
+			fmt.Fprintf(os.Stderr, "couldn't read peak players from %s (%v); falling back to -players %d\n", *playersURL, err, *players)
+		} else {
+			// Size for at least 1; an idle server still wants headroom for joins.
+			if peak < 1 {
+				peak = 1
+			}
+			opts.Players, opts.PlayersAuto = peak, true
+		}
+	}
+
+	plan := tune.Recommend(detect.Detect(), opts)
 
 	if *doApply {
 		runApply(plan, *props, *cfg, *write)

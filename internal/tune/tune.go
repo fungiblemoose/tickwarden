@@ -51,10 +51,31 @@ type Plan struct {
 	Recs    []Rec          `json:"recommendations"`
 }
 
+// Options carries the workload assumptions the rules can't read off the host:
+// how many players to size for, and whether chunk-system perf mods are present.
+type Options struct {
+	// Players is the expected PEAK concurrent count. Sizing for spread-out
+	// players is the conservative case; clustered players cost far less.
+	Players int
+	// PerfMods reports whether C2ME / ScalableLux et al. are installed — they
+	// raise the per-core budget by moving chunk gen off the main tick thread.
+	PerfMods bool
+	// PlayersAuto records that Players came from a live measurement (the
+	// companion's observed peak) rather than a guess, for the reason string.
+	PlayersAuto bool
+}
+
+// DefaultOptions assumes a small friends-server with perf mods — the common
+// case for anyone reaching for this tool.
+func DefaultOptions() Options { return Options{Players: 4, PerfMods: true} }
+
 const gib = 1 << 30
 
-// Recommend runs the rules engine over a profile.
-func Recommend(p detect.Profile) Plan {
+// Recommend runs the rules engine over a profile and workload assumptions.
+func Recommend(p detect.Profile, opts Options) Plan {
+	if opts.Players < 1 {
+		opts.Players = 1
+	}
 	plan := Plan{Profile: p}
 	add := func(k, v, reason string, c Confidence, t Target) {
 		plan.Recs = append(plan.Recs, Rec{Key: k, Value: v, Reason: reason, Confidence: c, Target: t})
@@ -97,11 +118,13 @@ func Recommend(p detect.Profile) Plan {
 	// AI scale with it); view distance is comparatively cheap (just sending
 	// chunks). Keep sim < view.
 	cores := p.EffectiveCores
-	view, sim := distancesForCores(cores)
+	view, sim := distancesFor(cores, opts.Players, opts.PerfMods)
 	add("view-distance", fmt.Sprintf("%d", view),
-		"view distance mostly costs bandwidth + chunk sends, not CPU; can run higher than sim", Heuristic, TargetProperties)
+		"view distance is mostly bandwidth + chunk sends, not CPU (cheaper still over pregenerated chunks); can sit a few above sim for visual range", Heuristic, TargetProperties)
 	add("simulation-distance", fmt.Sprintf("%d", sim),
-		"sim distance drives entity/redstone/AI ticking — the real per-tick CPU cost; keep it below view distance", Solid, TargetProperties)
+		fmt.Sprintf("sized for %s%d peak players on %.1f cores%s: per-tick cost scales with players × sim², so safe sim ∝ sqrt(budget/players); validate with `bench`",
+			autoTag(opts.PlayersAuto), opts.Players, cores, perfModsTag(opts.PerfMods)),
+		Solid, TargetProperties)
 
 	// --- Chunk system parallelism (C2ME) -------------------------------------
 	// Size worker pools to effective cores but always leave the main server
@@ -170,13 +193,56 @@ func heapForBudget(budget uint64) uint64 {
 	return (heap / gib) * gib
 }
 
-func distancesForCores(cores float64) (view, sim int) {
-	switch {
-	case cores >= 8:
-		return 12, 8
-	case cores >= 4:
-		return 10, 6
-	default:
-		return 8, 5
+// distancesFor sizes simulation and view distance to BOTH the host's
+// parallelism and the expected peak player load.
+//
+// Per-tick simulation cost grows with players × sim_distance² — each player
+// independently ticks the entities/redstone/mobs in their own area, and that
+// area scales with the square of the distance. So the safe simulation distance
+// falls as sqrt(core_budget / players): one player can run a high sim distance
+// that melts a server full of spread-out players. The per-core budget is higher
+// when chunk-system perf mods (C2ME et al.) move generation off the main tick
+// thread.
+//
+// CALIBRATION ANCHOR: budgetPerCore=64 is set so 3 effective cores / 2 peak
+// players / perf-mods yields sim≈10 — a real, spark-validated data point on the
+// reference server that holds 20 TPS (median tick ~7ms). Re-derive this
+// constant if `bench` ever contradicts it; see docs/DECISION_TREE.md.
+func distancesFor(cores float64, players int, perfMods bool) (view, sim int) {
+	if players < 1 {
+		players = 1
 	}
+	budgetPerCore := 64.0
+	if !perfMods {
+		budgetPerCore = 32.0 // vanilla gen hits the main thread; ~halve the budget
+	}
+	sim = clampInt(int(math.Round(math.Sqrt(budgetPerCore*cores/float64(players)))), 5, 16)
+	// View distance is mostly bandwidth + chunk sends (and cheap disk loads over
+	// pregenerated chunks), so it can sit above sim for visual range.
+	view = clampInt(sim+4, 8, 20)
+	return view, sim
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func autoTag(auto bool) string {
+	if auto {
+		return "measured "
+	}
+	return "~"
+}
+
+func perfModsTag(perfMods bool) string {
+	if perfMods {
+		return " (with perf mods)"
+	}
+	return " (no perf mods)"
 }

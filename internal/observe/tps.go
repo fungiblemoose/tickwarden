@@ -55,6 +55,32 @@ func (r *SparkHTTPReader) Read() (float64, float64, error) {
 	return payload.TPS, payload.MSPT, nil
 }
 
+// FetchPlayerPeak reads the companion's observed peak concurrent player count
+// from its endpoint. This is what lets `tune` size distances for the server's
+// ACTUAL measured load instead of a guess — closing the loop from "configure
+// for an assumed player count" to "configure for the one you really get".
+func FetchPlayerPeak(url string) (int, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("endpoint returned %d", resp.StatusCode)
+	}
+	var payload struct {
+		PlayersPeak *int `json:"players_peak"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return 0, err
+	}
+	if payload.PlayersPeak == nil {
+		return 0, fmt.Errorf("endpoint did not report players_peak (update the companion mod)")
+	}
+	return *payload.PlayersPeak, nil
+}
+
 // StubReader reports a flat healthy 20 TPS. Useful for exercising the watch
 // loop and PSI correlation without a live server wired up.
 type StubReader struct{}

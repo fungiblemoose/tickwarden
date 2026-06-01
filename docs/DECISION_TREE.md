@@ -55,22 +55,48 @@ The 12 GiB crossover is a reasonable rule of thumb, not a measured constant.
 
 ## 3. View distance vs. simulation distance — *sim is solid, view is heuristic*
 
-**Inputs:** effective cores.
+**Inputs:** effective cores, **expected peak concurrent players**, perf-mods present.
 
-**Decision:** keep **sim < view**.
+**Decision:**
 
-| effective cores | view | sim |
-|---|---|---|
-| ≥ 8 | 12 | 8 |
-| ≥ 4 | 10 | 6 |
-| < 4 | 8  | 5 |
+```
+sim = clamp( round( sqrt( budgetPerCore × cores / players ) ), 5, 16 )
+view = clamp( sim + 4, 8, 20 )
+budgetPerCore = 64 with perf mods, 32 without
+```
 
-**Why:** these two knobs have very different costs. **Simulation distance** drives
-entity ticking, redstone, mob AI, block updates, fluid flow — the real per-tick
-CPU work, and it scales roughly with the *area* simulated. **View distance** mostly
-costs bandwidth and chunk sends; it's comparatively cheap on CPU. People crank both
-together and blame "lag"; the fix is usually to pull sim distance down and leave
-view distance high so the world still *looks* big.
+| cores | players | perf mods | → sim | view |
+|---|---|---|---|---|
+| 3 | 2  | yes | 10 | 14 |
+| 3 | 4  | yes | 7  | 11 |
+| 3 | 16 | yes | 5  | 9  |
+| 8 | 4  | yes | 11 | 15 |
+| 8 | 4  | no  | 8  | 12 |
+
+**Why:** these two knobs have very different costs, and the cost depends on
+**how many players are loaded at once**, not just the hardware. **Simulation
+distance** drives entity ticking, redstone, mob AI, block updates, fluid flow —
+the real per-tick CPU work — and each player independently ticks the area around
+them, which scales with the *square* of the distance. So total per-tick cost ≈
+`players × sim²`, and the safe sim distance falls as `sqrt(budget / players)`:
+one player can run a sim distance that would melt a server full of spread-out
+players. (Clustered players overlap and cost far less; the model sizes for the
+conservative spread-out case.) **View distance** is mostly bandwidth and chunk
+sends — comparatively cheap on CPU, cheaper still over pregenerated chunks — so
+it sits a few above sim for visual range.
+
+The previous flat per-core table ignored player count and so badly
+under-recommended for low-population servers (it suggested view-8 where a
+hand-tuned view-20 holds 20 TPS at 1–2 players). Player count was the missing
+variable.
+
+> **Auto-detect:** the companion mod reports `players_peak`, so
+> `tune -players-url <endpoint>` sizes to the server's *measured* peak instead
+> of a guess — configure for the load you actually get, not an assumed one.
+
+**Still folklore:** `budgetPerCore` and the perf-mod multiplier are anchored to
+ONE validated data point (see the calibration log) and otherwise extrapolated.
+The exponent (sim²) is sound; the constant needs more `bench` points.
 
 ---
 
@@ -140,10 +166,38 @@ can diagnose, and the reason the `watch` subcommand exists.
 
 ## What's deliberately not here yet
 
-- **Player-count-aware rules** (VMP only earns its keep at higher player counts).
 - **Network/compression tuning** (Krypton, network-compression-threshold).
 - **GC flag-level detail** (the actual Aikar flag string, ZGC tuning).
 - **Pregeneration guidance** (Chunky rate vs. live load).
+- **Player *spread* awareness** (clustered vs. exploring) — the companion reports
+  count + peak today; distinguishing spread-out from grouped players is a TODO.
+- **Mod auto-detection** — `-perf-mods` is a flag; scanning the mods dir to set
+  it automatically is a TODO.
 
 These are intentionally staged behind the benchmark harness — adding rules we
 can't validate just grows the folklore surface.
+
+---
+
+## Calibration log — how these rules stay honest
+
+This file and `internal/tune/tune.go` are the SAME rules in two forms: the
+knowledge and the code. **Every learning updates both, in the same commit.** A
+rule's `Confidence` (`solid`/`heuristic`/`contested`) is its maturity, and the
+intended lifecycle is: `contested` → gather a `bench`/`bench-diff` data point →
+re-derive the constant → promote. Numbers in the code carry a `CALIBRATION
+ANCHOR` comment pointing back here so nobody "cleans up" a magic number that's
+actually load-bearing.
+
+Validated data points so far:
+
+| Date | Rule | Anchor measurement | Source |
+|---|---|---|---|
+| 2026-05-31 | distances `budgetPerCore=64` | 3 eff. cores, 2 players, perf mods → sim-10 holds 20 TPS (median tick ~7ms, max spike 61–67ms) | spark on the reference Proxmox LXC |
+| 2026-05-31 | perf-mod multiplier (~2×) | same box: max tick 145–288ms *before* C2ME/ScalableLux → 61–67ms *after* (~4× on the tail; budget bumped ~2× conservatively) | spark before/after |
+| 2026-05-31 | GC = G1+Aikar < 12 GiB | reference server runs Aikar G1 flags at 4 GiB heap, no TPS-visible pauses | live config |
+
+**Open calibrations needing data** (run `bench-diff` to settle):
+- Lighting engine Starlight-vs-ScalableLux crossover (rule 5, `contested`).
+- `budgetPerCore` at higher player counts — only the 2-player point is real.
+- GC 12 GiB G1→ZGC crossover (rule 2) — a rule of thumb, unmeasured.

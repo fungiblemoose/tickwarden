@@ -56,6 +56,8 @@ tickwarden detect          # what hardware/limits am I actually running under?
 tickwarden detect -json    # machine-readable
 
 tickwarden tune            # recommended settings, each with its reasoning
+tickwarden tune -players 8          # size view/sim distance for 8 peak players
+tickwarden tune -players-url http://127.0.0.1:9225/tps   # ...or for the MEASURED peak
 tickwarden tune -json
 
 tickwarden watch           # correlate TPS dips with host starvation (live)

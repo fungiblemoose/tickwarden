@@ -41,18 +41,27 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
     // Read by the HTTP handler thread; written by the server thread.
     private volatile double mspt = 0.0;
     private volatile double tps = 20.0;
+    // Player load — tickwarden uses the peak to size view/simulation distance to
+    // the server's ACTUAL load instead of a guess. peak is the max simultaneous
+    // count seen since startup (resets on restart; persisting it is a TODO).
+    private volatile int players = 0;
+    private volatile int playersPeak = 0;
 
     private HttpServer http;
 
     @Override
     public void onInitializeServer() {
         ServerTickEvents.START_SERVER_TICK.register(server -> tickStartNanos = System.nanoTime());
-        ServerTickEvents.END_SERVER_TICK.register(server -> recordTick(System.nanoTime()));
+        ServerTickEvents.END_SERVER_TICK.register(server -> recordTick(System.nanoTime(), server.getPlayerCount()));
         ServerLifecycleEvents.SERVER_STARTED.register(server -> startHttp());
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> stopHttp());
     }
 
-    private synchronized void recordTick(long endNanos) {
+    private synchronized void recordTick(long endNanos, int playerCount) {
+        players = playerCount;
+        if (playerCount > playersPeak) {
+            playersPeak = playerCount;
+        }
         if (tickStartNanos == 0) {
             return;
         }
@@ -93,7 +102,9 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
         try {
             http = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
             http.createContext("/tps", exchange -> {
-                String json = String.format(Locale.ROOT, "{\"tps\":%.2f,\"mspt\":%.2f}", tps, mspt);
+                String json = String.format(Locale.ROOT,
+                        "{\"tps\":%.2f,\"mspt\":%.2f,\"players\":%d,\"players_peak\":%d}",
+                        tps, mspt, players, playersPeak);
                 byte[] body = json.getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().set("Content-Type", "application/json");
                 exchange.sendResponseHeaders(200, body.length);
