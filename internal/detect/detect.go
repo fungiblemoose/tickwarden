@@ -82,6 +82,12 @@ func Detect() Profile {
 	if p.CgroupCPUQuota > 0 && p.CgroupCPUQuota < p.EffectiveCores {
 		p.EffectiveCores = p.CgroupCPUQuota
 		p.note("cgroup limits CPU to " + trimFloat(p.CgroupCPUQuota) + " cores (host has " + strconv.Itoa(p.LogicalCores) + "); sizing parallelism to the quota")
+	} else if p.Virt == VirtLXC {
+		// Proxmox `pct cpulimit` is enforced on a host cgroup above the
+		// container's namespace ceiling, so the quota is invisible from in here
+		// and EffectiveCores can read high even while the container is heavily
+		// throttled. PSI still catches the symptom — see `tickwarden watch`.
+		p.note("LXC: a host-applied CPU cap (e.g. Proxmox cpulimit) isn't visible from inside the container; effective cores may be lower than shown — use `watch` to detect throttling via pressure")
 	}
 
 	p.MemoryBudgetBytes = p.TotalRAMBytes

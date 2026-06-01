@@ -34,40 +34,87 @@ type PSI struct {
 
 // Pressure is a snapshot of all three PSI resources plus CPU throttling.
 type Pressure struct {
-	CPU            PSI     `json:"cpu"`
-	IO             PSI     `json:"io"`
-	Memory         PSI     `json:"memory"`
-	ThrottledUsec  uint64  `json:"throttled_usec"`  // cumulative CPU throttle time
-	NrThrottled    uint64  `json:"nr_throttled"`    // cumulative throttle events
-	Available      bool    `json:"available"`       // false if PSI couldn't be read
+	CPU           PSI    `json:"cpu"`
+	IO            PSI    `json:"io"`
+	Memory        PSI    `json:"memory"`
+	ThrottledUsec uint64 `json:"throttled_usec"` // cumulative CPU throttle time
+	NrThrottled   uint64 `json:"nr_throttled"`   // cumulative throttle events
+	Available     bool   `json:"available"`      // false if PSI couldn't be read
+	// Source is the cgroup directory the worst CPU pressure came from. It
+	// matters because in nested setups (notably Proxmox LXC) the workload runs
+	// in a leaf like /.lxc whose own PSI reads ~0, while the binding pressure
+	// shows up at an ancestor. We scan leaf→root and keep the worst.
+	Source string `json:"source,omitempty"`
 }
 
-// cgroupRoot resolves this process's cgroup-v2 directory.
-func cgroupRoot() string {
-	b, err := os.ReadFile("/proc/self/cgroup")
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) == 3 && parts[0] == "0" {
-			return filepath.Join("/sys/fs/cgroup", parts[2])
+// cgroupLevels lists this process's cgroup-v2 directory and every ancestor up
+// to (and including) the /sys/fs/cgroup mount root, leaf first.
+//
+// Walking the chain is essential: cgroup limits and the stalls they cause are
+// hierarchical, and the cgroup where the workload's processes live is often
+// NOT the cgroup where the binding constraint (and thus the pressure) appears.
+// On a Proxmox LXC, /proc/self/cgroup reports /.lxc but the meaningful PSI sits
+// at the namespace root one level up.
+func cgroupLevels() []string {
+	const base = "/sys/fs/cgroup"
+	rel := "/"
+	if b, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			parts := strings.SplitN(line, ":", 3)
+			if len(parts) == 3 && parts[0] == "0" {
+				rel = parts[2]
+			}
 		}
 	}
-	return ""
+	var dirs []string
+	for cur := filepath.Join(base, rel); strings.HasPrefix(cur, base); cur = filepath.Dir(cur) {
+		dirs = append(dirs, cur)
+		if cur == base {
+			break
+		}
+	}
+	return dirs
 }
 
-// ReadPressure snapshots the current cgroup's PSI and CPU throttling.
+// ReadPressure snapshots PSI and CPU throttling, taking the worst reading
+// across the cgroup chain so a near-zero leaf doesn't mask real pressure that
+// only registers at an ancestor cgroup.
 func ReadPressure() Pressure {
-	root := cgroupRoot()
-	if root == "" {
+	levels := cgroupLevels()
+	if len(levels) == 0 {
 		return Pressure{}
 	}
-	p := Pressure{Available: true}
-	p.CPU = readPSIFile(filepath.Join(root, "cpu.pressure"))
-	p.IO = readPSIFile(filepath.Join(root, "io.pressure"))
-	p.Memory = readPSIFile(filepath.Join(root, "memory.pressure"))
-	p.NrThrottled, p.ThrottledUsec = readCPUStat(filepath.Join(root, "cpu.stat"))
+	p := Pressure{}
+	for _, dir := range levels {
+		cpu := readPSIFile(filepath.Join(dir, "cpu.pressure"))
+		io := readPSIFile(filepath.Join(dir, "io.pressure"))
+		mem := readPSIFile(filepath.Join(dir, "memory.pressure"))
+		if cpu.SomeAvg10 > 0 || io.SomeAvg10 > 0 || mem.SomeAvg10 > 0 {
+			p.Available = true
+		}
+		if cpu.SomeAvg10 > p.CPU.SomeAvg10 {
+			p.CPU = cpu
+			p.Source = dir
+		}
+		if io.SomeAvg10 > p.IO.SomeAvg10 {
+			p.IO = io
+		}
+		if mem.SomeAvg10 > p.Memory.SomeAvg10 {
+			p.Memory = mem
+		}
+		// Throttling is accounted at whichever level actually enforces a quota;
+		// keep the largest counters seen. (A host-applied limit above the
+		// container's namespace ceiling stays invisible here — see Tier 2.)
+		if nr, usec := readCPUStat(filepath.Join(dir, "cpu.stat")); nr > p.NrThrottled {
+			p.NrThrottled, p.ThrottledUsec = nr, usec
+		}
+	}
+	// Even all-zero PSI is a valid reading if the files existed.
+	if !p.Available {
+		if _, err := os.Stat(filepath.Join(levels[0], "cpu.pressure")); err == nil {
+			p.Available = true
+		}
+	}
 	return p
 }
 

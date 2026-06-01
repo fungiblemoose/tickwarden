@@ -88,15 +88,47 @@ a later tier that does.
 
 | Tier | What | Status |
 |------|------|--------|
-| **0** | Static hardware/cgroup-aware tuner → annotated config | ✅ scaffolded (`detect`, `tune`) |
-| **1** | In-container observability: TPS ⨯ PSI/throttle correlation | 🚧 PSI reading real; TPS source is a stub + spark-HTTP seam |
+| **0** | Static hardware/cgroup-aware tuner → annotated config | ✅ functional (`detect`, `tune`) |
+| **0.5** | **Apply** recommendations to the real config files, with per-setting override | ⬜ planned (see below) |
+| **1** | In-container observability: TPS ⨯ PSI correlation | 🚧 PSI real + chain-walking; TPS source is a stub + spark-HTTP seam |
 | **1.5** | Benchmark harness (Chunky pregen / fake-player load) to *validate* tuning rules instead of trusting folklore | ⬜ planned — this is what turns the rules from blog-post to measured |
-| **2** | Host-side agent mapping cgroup → process, to *name* the noisy neighbor | ⬜ planned (fragments across LXC/Docker/bare-metal) |
-| **3** | Closed loop: auto back off view-distance / Chunky rate under starvation | ⬜ aspirational (and genuinely risky) |
+| **2** | Host-side agent mapping cgroup → process, to *name* the noisy neighbor and read host-applied limits | ⬜ planned (fragments across LXC/Docker/bare-metal) |
+| **3** | Closed loop: auto back off view-distance / Chunky rate *while* starved | ⬜ aspirational (and genuinely risky) |
 
 The honest hard part is **Tier 1.5**: without a repeatable load you can't know if
 a tuning change helped, so the rules stay folklore. With it, tickwarden has a
 real validation story and the dataset to make the rules engine learn.
+
+### Applying changes (Tier 0.5)
+
+Today `tune` only *prints* advice — you edit configs yourself, which is safe but
+tedious. The plan is `tickwarden tune --apply` that writes the recommendations
+into the real files (`server.properties`, the JVM flags in the systemd unit,
+mod configs like `c2me.toml`), with strong guardrails:
+
+- **Dry-run by default.** `--apply` shows a diff and asks; nothing changes
+  without an explicit confirm (or `--yes`).
+- **Manual override per setting.** A `tickwarden.toml` pins values you want to
+  keep — e.g. `simulation-distance = 10` — and the tuner treats those as locked,
+  never overwriting them, just flagging when its recommendation differs.
+- **Automatic `.bak` backups** before any edit, and a `tune --revert` to undo.
+- **Never live-edits a running server's behavior** — it writes config; you
+  restart on your schedule. (Reacting *while* running is the separate, riskier
+  Tier 3.)
+
+### Field-validated findings
+
+These came out of running tickwarden on a real Proxmox LXC, and shaped the design:
+
+- **PSI must be read up the cgroup chain, not just the leaf.** Inside a Proxmox
+  LXC the workload sits in `/.lxc`, whose own pressure reads ~0; the real CPU
+  pressure shows up at the namespace root one level up. `watch` now scans
+  leaf→root and keeps the worst.
+- **Host-applied CPU caps are invisible from inside the container.** Proxmox
+  `pct cpulimit` enforces on a cgroup *above* the container's namespace ceiling,
+  so the throttle counter reads 0 even when the container is throttled 90%+ of
+  the time. PSI still catches the *symptom*; *naming* the cap needs the Tier 2
+  host agent. This is the concrete reason that tier exists.
 
 ## License
 
