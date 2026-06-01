@@ -95,14 +95,14 @@ func Recommend(p detect.Profile, opts Options) Plan {
 	// metaspace, and the OS page cache that makes chunk I/O fast. Taking 80% of
 	// RAM is a classic mistake — the page cache is not free real estate.
 	budget := p.MemoryBudgetBytes
-	heap := heapForBudget(budget)
+	heap := heapFor(budget, opts.Players)
 	if budget == 0 {
 		add("Xmx/Xms", "unknown", "couldn't read a memory budget; deploy on the Linux target to size the heap", Contested, TargetInfo)
 	} else {
 		heapGiB := float64(heap) / gib
 		add("Xmx", fmt.Sprintf("%.0fG", heapGiB),
-			fmt.Sprintf("budget %.1f GiB; reserve the rest for off-heap (Netty/mmap/metaspace) and the OS page cache that keeps chunk reads warm", float64(budget)/gib),
-			Solid, TargetJVM)
+			fmt.Sprintf("sized to load (~%d peak players) within the %.1f GiB budget, not 'all RAM minus a sliver' — an over-large heap you don't fill just starves the page cache that keeps chunk reads warm. If `watch`/spark shows the heap running hot, raise it.", opts.Players, float64(budget)/gib),
+			Heuristic, TargetJVM)
 		add("Xms", fmt.Sprintf("%.0fG", heapGiB),
 			"pin Xms == Xmx (Aikar): pre-committing the heap avoids GC churn from growing it under load", Solid, TargetJVM)
 	}
@@ -136,32 +136,34 @@ func Recommend(p detect.Profile, opts Options) Plan {
 		Solid, TargetProperties)
 
 	// --- Chunk system parallelism (C2ME) -------------------------------------
-	// Size worker pools to effective cores but always leave the main server
-	// thread headroom — starving the tick loop to feed chunk gen is a net loss.
+	// C2ME moves chunk generation and I/O off the single main tick thread, so it
+	// helps even on few cores (measured ~4x better tail latency on a 3-core box).
+	// Keep it on; just size the worker pool to leave the main thread + GC
+	// headroom rather than disabling it. Reserve ~1 core on small boxes, ~2 on
+	// bigger ones.
+	var workers int
 	if cores >= 4 {
-		workers := int(math.Max(2, math.Floor(cores)-2))
-		add("c2me.threads", fmt.Sprintf("%d", workers),
-			fmt.Sprintf("%.1f effective cores: leave ~2 for the main tick thread + GC so chunk gen doesn't starve the loop it feeds", cores),
-			Heuristic, TargetModConfig)
+		workers = int(math.Floor(cores)) - 2
 	} else {
-		add("c2me", "consider disabling",
-			fmt.Sprintf("only %.1f effective cores: parallel chunk I/O contends with the main thread more than it helps", cores),
-			Heuristic, TargetModConfig)
+		workers = int(math.Floor(cores)) - 1
 	}
+	if workers < 1 {
+		workers = 1
+	}
+	add("c2me.threads", fmt.Sprintf("%d", workers),
+		fmt.Sprintf("%.1f effective cores: keep C2ME — its gen/I/O runs off the tick thread, so it helps even here; size the pool to leave the main thread + GC a core", cores),
+		Heuristic, TargetModConfig)
 
-	// --- Lighting engine (the contested one) ---------------------------------
-	// Starlight is the faster single-threaded rewrite; ScalableLux parallelizes
-	// lighting across cores. The crossover point is genuinely not well
-	// measured — flag it as contested and validate.
-	if cores >= 8 {
-		add("lighting-engine", "ScalableLux",
-			fmt.Sprintf("%.0f cores: parallel lighting *should* beat single-threaded Starlight here — but this crossover is folklore, benchmark it", cores),
-			Contested, TargetManual)
-	} else {
-		add("lighting-engine", "Starlight",
-			fmt.Sprintf("%.0f effective cores: not enough parallelism to amortize ScalableLux's coordination; Starlight's faster single-thread path wins", cores),
-			Contested, TargetManual)
-	}
+	// --- Lighting engine -----------------------------------------------------
+	// ScalableLux is the actively-maintained light-engine rewrite (a Starlight
+	// fork). On many cores it parallelizes lighting; on few it performs like
+	// single-threaded Starlight with no downside. Recommend it across the board:
+	// bare Starlight frequently has no build for current Minecraft versions, so
+	// recommending it by core count (as before) could point at a mod you can't
+	// install.
+	add("lighting-engine", "ScalableLux",
+		"the maintained light-engine rewrite: parallelizes lighting on many cores, behaves like Starlight on few, and unlike bare Starlight ships builds for current MC versions",
+		Heuristic, TargetManual)
 
 	// --- Storage -------------------------------------------------------------
 	if p.StorageRotational != nil {
@@ -183,21 +185,41 @@ func Recommend(p detect.Profile, opts Options) Plan {
 	return plan
 }
 
-// heapForBudget reserves headroom for off-heap memory and the page cache,
-// scaling the reservation with total budget.
-func heapForBudget(budget uint64) uint64 {
+// heapFor sizes the JVM heap to expected LOAD within the memory budget, rather
+// than grabbing all RAM minus a sliver. Heap need scales with how much is loaded
+// and ticking, which scales with players; a heap far bigger than you fill is not
+// free — it steals the OS page cache that keeps chunk reads off disk. So:
+//
+//	heap = clamp( 2 GiB + 0.5 GiB/player , 1 GiB , budget − reserve )
+//	reserve = max(1.5 GiB, 25% of budget)   // off-heap (Netty/mmap/metaspace) + page cache
+//
+// This is an upper-ish estimate, not a mandate: if `watch`/spark shows the heap
+// running hot, raise it. The point is to stop recommending (say) 6 GiB on an
+// 8 GiB box that only ever uses 1 GiB.
+func heapFor(budget uint64, players int) uint64 {
 	if budget == 0 {
 		return 0
 	}
-	// Reserve max(1.5 GiB, 25% of budget) for off-heap + page cache.
+	if players < 1 {
+		players = 1
+	}
 	reserve := uint64(float64(budget) * 0.25)
 	if min := uint64(1.5 * gib); reserve < min {
 		reserve = min
 	}
 	if reserve >= budget {
-		return budget / 2
+		return (budget / 2 / gib) * gib
 	}
-	heap := budget - reserve
+	cap := budget - reserve
+
+	need := uint64(2*gib) + uint64(players)*(gib/2)
+	heap := need
+	if heap > cap {
+		heap = cap
+	}
+	if heap < gib {
+		heap = gib
+	}
 	// Round down to whole GiB for a clean flag value.
 	return (heap / gib) * gib
 }

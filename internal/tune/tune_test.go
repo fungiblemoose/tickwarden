@@ -85,6 +85,52 @@ func TestClusteredNeverLowersSim(t *testing.T) {
 	}
 }
 
+func recVal(t *testing.T, p detect.Profile, opts Options, key string) (string, bool) {
+	t.Helper()
+	for _, r := range Recommend(p, opts).Recs {
+		if r.Key == key {
+			return r.Value, true
+		}
+	}
+	return "", false
+}
+
+// Heap should track expected load within the budget, not grab all-RAM-minus-a-sliver:
+// 8 GiB / 2 players → 3 GiB (not 6), while 8 GiB / 8 players → 6 GiB.
+func TestHeapSizedToLoad(t *testing.T) {
+	p := detect.Profile{EffectiveCores: 3, MemoryBudgetBytes: 8 << 30}
+	if v, _ := recVal(t, p, Options{Players: 2, PerfMods: true}, "Xmx"); v != "3G" {
+		t.Fatalf("8GiB/2players Xmx: want 3G, got %q", v)
+	}
+	if v, _ := recVal(t, p, Options{Players: 8, PerfMods: true}, "Xmx"); v != "6G" {
+		t.Fatalf("8GiB/8players Xmx: want 6G, got %q", v)
+	}
+}
+
+// C2ME must be kept (not disabled) even on a 3-core box, sized to 2 workers
+// (leave the main thread a core) — the measured-helpful config on the ref server.
+func TestC2MEKeptOnFewCores(t *testing.T) {
+	p := detect.Profile{EffectiveCores: 3, MemoryBudgetBytes: 8 << 30}
+	v, ok := recVal(t, p, Options{Players: 2, PerfMods: true}, "c2me.threads")
+	if !ok || v != "2" {
+		t.Fatalf("3 cores should keep C2ME at 2 workers, got %q (present=%v)", v, ok)
+	}
+	if _, disabled := recVal(t, p, Options{Players: 2, PerfMods: true}, "c2me"); disabled {
+		t.Fatal("must not emit a 'consider disabling' c2me rec on few cores")
+	}
+}
+
+// Lighting must recommend the maintained ScalableLux regardless of core count —
+// never bare Starlight, which often has no build for the current MC version.
+func TestLightingAlwaysScalableLux(t *testing.T) {
+	for _, cores := range []float64{3, 8, 16} {
+		p := detect.Profile{EffectiveCores: cores, MemoryBudgetBytes: 8 << 30}
+		if v, _ := recVal(t, p, Options{Players: 2, PerfMods: true}, "lighting-engine"); v != "ScalableLux" {
+			t.Fatalf("%.0f cores: lighting want ScalableLux, got %q", cores, v)
+		}
+	}
+}
+
 func TestSimClamped(t *testing.T) {
 	// Huge cores, one player must not produce an absurd sim distance.
 	if got := simFor(t, 64, 1, true); got > 16 {

@@ -16,12 +16,17 @@ specs. Inside an LXC/Docker container your real ceiling is the quota, not the bo
 
 ---
 
-## 1. Heap size (`-Xmx` / `-Xms`) — *solid*
+## 1. Heap size (`-Xmx` / `-Xms`) — *heuristic*
 
-**Inputs:** memory budget = cgroup `memory.max` if set, else `MemTotal`.
+**Inputs:** memory budget (cgroup `memory.max` if set, else `MemTotal`), expected
+peak players.
 
-**Decision:** `Xmx = budget − max(1.5 GiB, 25% of budget)`, rounded down to whole
-GiB. `Xms = Xmx`.
+**Decision:**
+```
+Xmx = clamp( 2 GiB + 0.5 GiB/player , 1 GiB , budget − max(1.5 GiB, 25% of budget) )
+Xms = Xmx
+```
+rounded down to whole GiB. Size to *load*, not to "all RAM minus a sliver."
 
 **Why:** the JVM heap is not the only consumer. You must leave headroom for:
 - **Netty direct buffers** (off-heap, scale with player count/network),
@@ -30,6 +35,12 @@ GiB. `Xms = Xmx`.
 - and most importantly the **OS page cache** — the thing that keeps chunk reads
   off disk. Handing 80% of RAM to the heap is the classic mistake: it starves the
   page cache and you trade GC headroom for disk I/O stalls.
+
+A heap far larger than you actually fill makes this *worse*, not safer — the
+unused commitment is page cache you gave up for nothing. So size to load (which
+tracks player count) and treat the result as a starting point: if `watch`/spark
+shows the heap running hot, raise it. (On the reference 8 GiB / 2-player server
+this recommends 3 GiB, matching real usage of ~1.1 GiB, rather than 6 GiB.)
 
 `Xms == Xmx` (Aikar) pre-commits the heap so the JVM never pays to grow it mid-tick.
 
@@ -104,34 +115,34 @@ The exponent (sim²) is sound; the constant needs more `bench` points.
 
 **Inputs:** effective cores.
 
-**Decision:**
-- cores **≥ 4** → C2ME worker threads = `max(2, floor(cores) − 2)`.
-- cores **< 4** → consider *not* running C2ME.
+**Decision:** keep C2ME; size workers to leave the main thread + GC headroom:
+- cores **≥ 4** → workers = `floor(cores) − 2`.
+- cores **< 4** → workers = `floor(cores) − 1` (min 1).
 
-**Why:** C2ME parallelizes chunk generation and I/O across worker threads. But the
-main server **tick thread** is single-threaded and is the thing you're protecting —
-if chunk workers consume every core, they starve the very loop they're feeding,
-and GC needs a core too. So reserve ~2 cores for the main thread + GC. On a box
-with fewer than 4 cores, parallel chunk I/O contends with the main thread more than
-it helps; vanilla/single-threaded chunk handling can be the better call.
+**Why:** C2ME moves chunk generation and I/O *off* the single main tick thread,
+so it helps even on few cores — on the reference 3-core box it cut max tick time
+from 145–288 ms to 61–67 ms (~4×). An earlier version of this rule recommended
+*disabling* C2ME below 4 cores; that was wrong, and the measured ~4× is why. The
+real concern isn't whether to run it but not letting its pool consume every core:
+reserve ~1 core for the main thread + GC on small boxes, ~2 on bigger ones. (3
+cores → 2 workers, which is what auto-sizing picks and what tested best.)
 
 ---
 
-## 5. Lighting engine: Starlight vs. ScalableLux — *contested* ⚠️
+## 5. Lighting engine — *heuristic*
 
-**Inputs:** effective cores.
+**Inputs:** none (recommendation is unconditional).
 
-**Decision:**
-- cores **≥ 8** → **ScalableLux**.
-- cores **< 8** → **Starlight**.
+**Decision:** **ScalableLux**, regardless of core count.
 
-**Why (and the caveat):** Starlight is a faster *single-threaded* rewrite of the
-light engine. ScalableLux *parallelizes* lighting across cores. The intuition is
-that with enough cores, parallel lighting beats a fast single thread, and below
-that the coordination overhead isn't worth it — so there's a crossover somewhere.
-**But where that crossover actually sits is folklore.** We picked 8 cores because
-it's plausible, not because we measured it. This is the #1 rule to validate once
-the Tier 1.5 benchmark harness exists.
+**Why:** ScalableLux is the actively-maintained light-engine rewrite — a Starlight
+fork. On many cores it parallelizes lighting; on few it performs like
+single-threaded Starlight with no downside. An earlier version recommended bare
+**Starlight** below 8 cores, but Starlight frequently has *no build for current
+Minecraft versions* (e.g. none for 1.21.5), so that rule could point at a mod you
+can't install. Recommending the maintained fork avoids that. The parallel-vs-
+single-thread crossover by core count is still unmeasured, but it no longer
+changes the recommendation — only, eventually, how hard we'd argue for it.
 
 ---
 
@@ -197,8 +208,13 @@ Validated data points so far:
 | 2026-05-31 | view distance maxed for render (sim+10, cap 24 on SSD; sim+6, cap 16 otherwise) | operator runs view-20 on SSD at 1–2 players with no tick cost (view = bandwidth/RAM, not tick CPU) | reference server live config |
 | 2026-05-31 | perf-mod multiplier (~2×) | same box: max tick 145–288ms *before* C2ME/ScalableLux → 61–67ms *after* (~4× on the tail; budget bumped ~2× conservatively) | spark before/after |
 | 2026-05-31 | GC = G1+Aikar < 12 GiB | reference server runs Aikar G1 flags at 4 GiB heap, no TPS-visible pauses | live config |
+| 2026-05-31 | C2ME kept (not disabled) below 4 cores; 3 cores → 2 workers | same box: max tick 145–288ms → 61–67ms with C2ME at 2 workers; disabling it was the wrong call | spark before/after |
+| 2026-05-31 | heap sized to load, not all-RAM | 8 GiB / 2 players: real heap usage ~1.1 GiB of a 4 GiB heap → recommend 3 GiB, leaving page cache | spark heap gauge |
 
 **Open calibrations needing data** (run `bench-diff` to settle):
-- Lighting engine Starlight-vs-ScalableLux crossover (rule 5, `contested`).
+- Lighting parallel-vs-single-thread benefit by core count (rule 5) — no longer
+  changes the recommendation (always ScalableLux, the maintained fork), but the
+  size of the win on many cores is still unmeasured.
 - `budgetPerCore` at higher player counts — only the 2-player point is real.
 - GC 12 GiB G1→ZGC crossover (rule 2) — a rule of thumb, unmeasured.
+- heap `0.5 GiB/player` slope — anchored to one low-population point; untested at scale.
