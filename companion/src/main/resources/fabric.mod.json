@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "tickwarden-companion",
+  "version": "${version}",
+  "name": "tickwarden companion",
+  "description": "Exposes the dedicated server's TPS/MSPT over a localhost HTTP endpoint so tickwarden can correlate in-game tick health with host-side resource pressure.",
+  "authors": ["Backspin Labs"],
+  "contact": {
+    "homepage": "https://github.com/fungiblemoose/tickwarden",
+    "sources": "https://github.com/fungiblemoose/tickwarden"
+  },
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "server": ["com.backspinlabs.tickwarden.companion.TickwardenCompanion"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric-api": "*",
+    "minecraft": "~1.21.5",
+    "java": ">=21"
+  }
+}

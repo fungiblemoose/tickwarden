@@ -8,6 +8,11 @@
 *.out
 /vendor/
 
+# Gradle / Fabric companion build output
+companion/build/
+companion/.gradle/
+.gradle/
+
 # Editor / OS
 .DS_Store
 *.swp

@@ -37,6 +37,8 @@ func main() {
 		cmdTune(os.Args[2:])
 	case "watch":
 		cmdWatch(os.Args[2:])
+	case "bench":
+		cmdBench(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("tickwarden", version)
 	case "help", "-h", "--help":
@@ -55,6 +57,7 @@ Usage:
   tickwarden detect [-json]        print the detected host/cgroup profile
   tickwarden tune   [-json]        recommend server settings, with reasons
   tickwarden watch  [flags]        correlate TPS dips with host starvation
+  tickwarden bench  [flags]        measure a window: TPS/MSPT + pressure stats
   tickwarden version
 
 Run a command with -h for its flags.
@@ -139,6 +142,58 @@ func cmdWatch(args []string) {
 		fmt.Fprintln(os.Stderr, "watch stopped:", err)
 		os.Exit(1)
 	}
+}
+
+func cmdBench(args []string) {
+	fs := flag.NewFlagSet("bench", flag.ExitOnError)
+	endpoint := fs.String("tps-url", "", "HTTP endpoint returning {\"tps\":..,\"mspt\":..}; empty uses a stub reader")
+	interval := fs.Duration("interval", 1*time.Second, "sampling interval")
+	duration := fs.Duration("duration", 60*time.Second, "total measurement window")
+	label := fs.String("label", "", "label for this run (e.g. the tuning being tested)")
+	asJSON := fs.Bool("json", false, "emit the stats as JSON (suitable for before/after diffing)")
+	fs.Parse(args)
+
+	var reader observe.TPSReader = observe.StubReader{}
+	if *endpoint != "" {
+		reader = observe.NewSparkHTTPReader(*endpoint)
+	}
+	count := int(*duration / *interval)
+	if count < 1 {
+		count = 1
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Fprintf(os.Stderr, "benchmarking %d samples @ %s via %s — keep the load constant; ctrl-c to stop early\n",
+		count, *interval, reader.Name())
+
+	stats, _ := observe.Bench(ctx, reader, observe.DefaultThresholds(), *interval, count, *label, time.Now)
+	if *asJSON {
+		printJSON(stats)
+		return
+	}
+	fmt.Printf("\nBenchmark%s — %d samples over %s\n", labelSuffix(stats.Label), stats.Samples, stats.Duration)
+	fmt.Printf("  TPS:            min %.1f · mean %.2f\n", stats.TPSMin, stats.TPSMean)
+	fmt.Printf("  MSPT:           mean %.2f · p95 %.2f · max %.2f ms\n", stats.MSPTMean, stats.MSPTP95, stats.MSPTMax)
+	fmt.Printf("  CPU pressure:   mean %.1f%% · peak %.1f%%\n", stats.CPUPressureMean, stats.CPUPressurePeak)
+	fmt.Printf("  I/O pressure:   mean %.1f%% · peak %.1f%%\n", stats.IOPressureMean, stats.IOPressurePeak)
+	fmt.Printf("  mem pressure:   peak %.1f%%\n", stats.MemPressurePeak)
+	fmt.Printf("  CPU throttled:  %d events during window\n", stats.ThrottledDelta)
+	fmt.Printf("  verdicts:       ")
+	for _, v := range []observe.Verdict{observe.Healthy, observe.HostStarved, observe.GameBound, observe.Unknown} {
+		if n := stats.Verdicts[v]; n > 0 {
+			fmt.Printf("%s=%d ", v, n)
+		}
+	}
+	fmt.Println()
+	fmt.Printf("\nTo compare a tuning change, run this again with the SAME load + a new -label, and diff the two.\n")
+}
+
+func labelSuffix(s string) string {
+	if s == "" {
+		return ""
+	}
+	return " [" + s + "]"
 }
 
 func printJSON(v any) {

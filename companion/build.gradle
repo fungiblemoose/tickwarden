@@ -1,0 +1,42 @@
+plugins {
+    id 'fabric-loom' version '1.10-SNAPSHOT'
+    id 'java'
+}
+
+version = '0.1.0'
+group = 'com.backspinlabs.tickwarden'
+
+base {
+    archivesName = 'tickwarden-companion'
+}
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://maven.fabricmc.net/' }
+}
+
+// Versions pinned to match the target server (Minecraft 1.21.5).
+// fabric-api version copied verbatim from the server's mods/ directory.
+dependencies {
+    minecraft 'com.mojang:minecraft:1.21.5'
+    mappings loom.officialMojangMappings()
+    modImplementation 'net.fabricmc:fabric-loader:0.16.14'
+    modImplementation 'net.fabricmc.fabric-api:fabric-api:0.128.2+1.21.5'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') {
+        expand version: project.version
+    }
+}

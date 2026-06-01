@@ -14,9 +14,10 @@ It does two things nothing else does well:
    it can say *"your modpack is fine — a neighbor saturated the shared I/O pool"*
    — a diagnosis spark literally cannot make, because spark only sees inside the JVM.
 
-> Status: early scaffold. `detect` and `tune` are real; `watch` reads real cgroup
-> PSI but ships with a stub TPS source until the spark companion is wired up. See
-> the roadmap below.
+> Status: `detect`, `tune`, `watch`, and `bench` all work. `watch`/`bench` read
+> real cgroup PSI and real TPS via a tiny Fabric companion mod (in `companion/`).
+> Validated live on a Proxmox LXC running Minecraft 1.21.5 + Fabric. See the
+> roadmap for what's next.
 
 ## Why this exists
 
@@ -59,7 +60,27 @@ tickwarden tune -json
 
 tickwarden watch           # correlate TPS dips with host starvation (live)
 tickwarden watch -tps-url http://127.0.0.1:9225/tps -interval 5s
+
+tickwarden bench -tps-url http://127.0.0.1:9225/tps -duration 60s -label "view20-sim10"
+                           # measure a window: TPS/MSPT + pressure stats, for A/B tuning
 ```
+
+## TPS source: the Fabric companion (`companion/`)
+
+`watch` and `bench` need the server's real tick health, which lives inside the
+JVM. spark can't provide it over RCON (its commands reply asynchronously and come
+back empty), so `companion/` is a ~90-line Fabric mod that times every server
+tick and serves rolling TPS/MSPT as JSON on a localhost-only endpoint:
+
+```sh
+cd companion && ./gradlew build         # needs JDK 21; pins fabric-api to 1.21.5
+# drop build/libs/tickwarden-companion-*.jar in your server's mods/ and restart
+curl http://127.0.0.1:9225/tps          # {"tps":20.00,"mspt":6.33}
+```
+
+Port is `9225` by default (`-Dtickwarden.port=` or `TICKWARDEN_PORT` to change),
+bound to `127.0.0.1` only. Versions in `companion/build.gradle` are pinned to
+Minecraft 1.21.5; bump them to match other server versions.
 
 `tune` labels every recommendation by confidence:
 `solid` (trust it) · `heuristic` (sane default) · `contested` (validate against
@@ -90,8 +111,8 @@ a later tier that does.
 |------|------|--------|
 | **0** | Static hardware/cgroup-aware tuner → annotated config | ✅ functional (`detect`, `tune`) |
 | **0.5** | **Apply** recommendations to the real config files, with per-setting override | ⬜ planned (see below) |
-| **1** | In-container observability: TPS ⨯ PSI correlation | 🚧 PSI real + chain-walking; TPS source is a stub + spark-HTTP seam |
-| **1.5** | Benchmark harness (Chunky pregen / fake-player load) to *validate* tuning rules instead of trusting folklore | ⬜ planned — this is what turns the rules from blog-post to measured |
+| **1** | In-container observability: TPS ⨯ PSI correlation (`watch`) | ✅ functional — real PSI (chain-walked) + real TPS via the companion mod |
+| **1.5** | Benchmark harness to *validate* tuning rules instead of trusting folklore (`bench`) | 🟡 `bench` captures TPS/MSPT + pressure over a window; still needs a built-in controlled-load driver + before/after diff |
 | **2** | Host-side agent mapping cgroup → process, to *name* the noisy neighbor and read host-applied limits | ⬜ planned (fragments across LXC/Docker/bare-metal) |
 | **3** | Closed loop: auto back off view-distance / Chunky rate *while* starved | ⬜ aspirational (and genuinely risky) |
 
