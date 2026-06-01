@@ -61,9 +61,15 @@ tickwarden tune -json
 tickwarden watch           # correlate TPS dips with host starvation (live)
 tickwarden watch -tps-url http://127.0.0.1:9225/tps -interval 5s
 
-tickwarden bench -tps-url http://127.0.0.1:9225/tps -duration 60s -label "view20-sim10"
-                           # measure a window: TPS/MSPT + pressure stats, for A/B tuning
+tickwarden bench -tps-url http://127.0.0.1:9225/tps -duration 60s -label before -out before.json
+# ...change a setting, restart, then re-run under the SAME load...
+tickwarden bench -tps-url http://127.0.0.1:9225/tps -duration 60s -label after  -out after.json
+tickwarden bench-diff before.json after.json   # did it actually help?
 ```
+
+`bench-diff` won't be fooled: if host pressure differed between the two runs it
+marks the comparison **INCONCLUSIVE**, because then a TPS change might just
+reflect what else the box was doing — the exact trap a naive before/after misses.
 
 ## TPS source: the Fabric companion (`companion/`)
 
@@ -110,9 +116,9 @@ a later tier that does.
 | Tier | What | Status |
 |------|------|--------|
 | **0** | Static hardware/cgroup-aware tuner → annotated config | ✅ functional (`detect`, `tune`) |
-| **0.5** | **Apply** recommendations to the real config files, with per-setting override | ⬜ planned (see below) |
+| **0.5** | **Apply** recommendations to server.properties, with per-setting override | ✅ functional (`tune -apply`/`-write`/`-revert` + `tickwarden.toml` locks) |
 | **1** | In-container observability: TPS ⨯ PSI correlation (`watch`) | ✅ functional — real PSI (chain-walked) + real TPS via the companion mod |
-| **1.5** | Benchmark harness to *validate* tuning rules instead of trusting folklore (`bench`) | 🟡 `bench` captures TPS/MSPT + pressure over a window; still needs a built-in controlled-load driver + before/after diff |
+| **1.5** | Benchmark harness to *validate* tuning rules instead of trusting folklore | ✅ `bench` + `bench-diff` (with host-load confound detection); ⬜ still want a built-in controlled-load driver |
 | **2** | Host-side agent mapping cgroup → process, to *name* the noisy neighbor and read host-applied limits | ⬜ planned (fragments across LXC/Docker/bare-metal) |
 | **3** | Closed loop: auto back off view-distance / Chunky rate *while* starved | ⬜ aspirational (and genuinely risky) |
 
@@ -122,20 +128,34 @@ real validation story and the dataset to make the rules engine learn.
 
 ### Applying changes (Tier 0.5)
 
-Today `tune` only *prints* advice — you edit configs yourself, which is safe but
-tedious. The plan is `tickwarden tune --apply` that writes the recommendations
-into the real files (`server.properties`, the JVM flags in the systemd unit,
-mod configs like `c2me.toml`), with strong guardrails:
+`tune -apply` writes the server.properties recommendations into the real file,
+with guardrails:
 
-- **Dry-run by default.** `--apply` shows a diff and asks; nothing changes
-  without an explicit confirm (or `--yes`).
-- **Manual override per setting.** A `tickwarden.toml` pins values you want to
-  keep — e.g. `simulation-distance = 10` — and the tuner treats those as locked,
-  never overwriting them, just flagging when its recommendation differs.
-- **Automatic `.bak` backups** before any edit, and a `tune --revert` to undo.
-- **Never live-edits a running server's behavior** — it writes config; you
-  restart on your schedule. (Reacting *while* running is the separate, riskier
-  Tier 3.)
+```sh
+tickwarden tune -apply                       # dry run: shows the diff, writes nothing
+tickwarden tune -apply -write                # applies (after a .bak backup)
+tickwarden tune -revert                      # restores from the .bak
+tickwarden tune -apply -config tickwarden.toml   # honour your locked settings
+```
+
+- **Dry-run by default** — nothing changes without `-write`.
+- **Per-setting override.** A `tickwarden.toml` pins values you want kept; the
+  tuner never overwrites them, only flags where it disagrees:
+  ```toml
+  [lock]
+  view-distance = true        # I run view-20 on purpose; don't touch it
+  simulation-distance = true
+  ```
+- **Automatic `.bak`** before any edit, undone by `tune -revert`.
+- **server.properties only, for now.** JVM flags and mod configs are *reported*
+  (`apply by hand: …`) rather than auto-written — editing a systemd unit or a
+  mod's TOML is format-specific and riskier than it's worth. It writes config;
+  you restart on your own schedule.
+
+> Note: the rules are deliberately conservative — e.g. on a 3-core box they
+> suggest `view-distance=8`, even though with C2ME + ScalableLux a hand-tuned
+> view-20 holds 20 TPS. That's what the lock file is for, and a sign the rules
+> should eventually factor in which performance mods are installed.
 
 ### Field-validated findings
 

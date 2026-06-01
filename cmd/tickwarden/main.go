@@ -15,9 +15,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/fungiblemoose/tickwarden/internal/apply"
 	"github.com/fungiblemoose/tickwarden/internal/detect"
 	"github.com/fungiblemoose/tickwarden/internal/observe"
 	"github.com/fungiblemoose/tickwarden/internal/tune"
@@ -39,6 +41,8 @@ func main() {
 		cmdWatch(os.Args[2:])
 	case "bench":
 		cmdBench(os.Args[2:])
+	case "bench-diff":
+		cmdBenchDiff(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("tickwarden", version)
 	case "help", "-h", "--help":
@@ -58,6 +62,7 @@ Usage:
   tickwarden tune   [-json]        recommend server settings, with reasons
   tickwarden watch  [flags]        correlate TPS dips with host starvation
   tickwarden bench  [flags]        measure a window: TPS/MSPT + pressure stats
+  tickwarden bench-diff A.json B.json   compare two bench runs (before/after a change)
   tickwarden version
 
 Run a command with -h for its flags.
@@ -93,9 +98,29 @@ func cmdDetect(args []string) {
 func cmdTune(args []string) {
 	fs := flag.NewFlagSet("tune", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "emit JSON")
+	doApply := fs.Bool("apply", false, "apply server.properties recommendations (dry-run unless -write)")
+	write := fs.Bool("write", false, "with -apply, actually write the file (after backing it up)")
+	revert := fs.Bool("revert", false, "restore server.properties from its .bak backup")
+	props := fs.String("properties", "server.properties", "path to server.properties")
+	cfg := fs.String("config", "tickwarden.toml", "path to lock config (keys you want left alone)")
 	fs.Parse(args)
 
+	if *revert {
+		if err := apply.Revert(*props); err != nil {
+			fmt.Fprintln(os.Stderr, "revert failed:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("reverted %s from %s.bak\n", *props, *props)
+		return
+	}
+
 	plan := tune.Recommend(detect.Detect())
+
+	if *doApply {
+		runApply(plan, *props, *cfg, *write)
+		return
+	}
+
 	if *asJSON {
 		printJSON(plan)
 		return
@@ -107,6 +132,69 @@ func cmdTune(args []string) {
 		fmt.Printf("        ↳ %s\n", r.Reason)
 	}
 	fmt.Printf("\nLegend: solid = trust it · heuristic = sane default · contested = validate against your load\n")
+	fmt.Printf("Tip: `tune -apply` previews writing the server.properties settings; add -write to commit.\n")
+}
+
+func runApply(plan tune.Plan, propsPath, cfgPath string, write bool) {
+	locks, err := apply.LoadLocks(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "reading lock config:", err)
+		os.Exit(1)
+	}
+	ap, err := apply.PlanProperties(propsPath, plan, locks)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "can't read %s: %v\n", propsPath, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Apply plan for %s\n\n", propsPath)
+	if len(ap.Changes) == 0 {
+		fmt.Println("  nothing to change — server.properties already matches the recommendations.")
+	}
+	for _, c := range ap.Changes {
+		old := c.Old
+		if !c.Present {
+			old = "(absent)"
+		}
+		fmt.Printf("  [%s] %s: %s → %s\n", c.Confidence, c.Key, old, c.New)
+		fmt.Printf("        ↳ %s\n", c.Reason)
+	}
+	for _, c := range ap.Locked {
+		fmt.Printf("  [locked] %s: keeping your %s (tickwarden suggests %s)\n", c.Key, c.Old, c.New)
+	}
+	if len(ap.Unchanged) > 0 {
+		var keys []string
+		for _, c := range ap.Unchanged {
+			keys = append(keys, c.Key)
+		}
+		fmt.Printf("  unchanged (already optimal): %s\n", strings.Join(keys, ", "))
+	}
+
+	// Remind which recommendations this command can't touch.
+	var manual []string
+	for _, r := range plan.Recs {
+		if r.Target == tune.TargetJVM || r.Target == tune.TargetModConfig || r.Target == tune.TargetManual {
+			manual = append(manual, fmt.Sprintf("%s=%s (%s)", r.Key, r.Value, r.Target))
+		}
+	}
+	if len(manual) > 0 {
+		fmt.Printf("\n  apply by hand (not server.properties): %s\n", strings.Join(manual, "; "))
+	}
+
+	if !write {
+		fmt.Printf("\nDry run. Re-run with -write to apply the %d change(s); a .bak backup is made first, and `tune -revert` undoes it.\n", len(ap.Changes))
+		return
+	}
+	backup, err := ap.Write()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "write failed:", err)
+		os.Exit(1)
+	}
+	if backup == "" {
+		fmt.Println("\nNo changes written.")
+		return
+	}
+	fmt.Printf("\nWrote %d change(s) to %s (backup at %s). Restart the server to apply; `tune -revert` to undo.\n", len(ap.Changes), propsPath, backup)
 }
 
 func cmdWatch(args []string) {
@@ -151,6 +239,7 @@ func cmdBench(args []string) {
 	duration := fs.Duration("duration", 60*time.Second, "total measurement window")
 	label := fs.String("label", "", "label for this run (e.g. the tuning being tested)")
 	asJSON := fs.Bool("json", false, "emit the stats as JSON (suitable for before/after diffing)")
+	out := fs.String("out", "", "also write the stats JSON to this file (for `bench-diff`)")
 	fs.Parse(args)
 
 	var reader observe.TPSReader = observe.StubReader{}
@@ -168,6 +257,13 @@ func cmdBench(args []string) {
 		count, *interval, reader.Name())
 
 	stats, _ := observe.Bench(ctx, reader, observe.DefaultThresholds(), *interval, count, *label, time.Now)
+	if *out != "" {
+		if err := writeJSONFile(*out, stats); err != nil {
+			fmt.Fprintln(os.Stderr, "writing -out file:", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "saved stats to %s\n", *out)
+		}
+	}
 	if *asJSON {
 		printJSON(stats)
 		return
@@ -187,6 +283,59 @@ func cmdBench(args []string) {
 	}
 	fmt.Println()
 	fmt.Printf("\nTo compare a tuning change, run this again with the SAME load + a new -label, and diff the two.\n")
+}
+
+func cmdBenchDiff(args []string) {
+	fs := flag.NewFlagSet("bench-diff", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "emit the diff as JSON")
+	fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: tickwarden bench-diff <before.json> <after.json>")
+		os.Exit(2)
+	}
+
+	var a, b observe.BenchStats
+	if err := readJSONFile(rest[0], &a); err != nil {
+		fmt.Fprintf(os.Stderr, "reading %s: %v\n", rest[0], err)
+		os.Exit(1)
+	}
+	if err := readJSONFile(rest[1], &b); err != nil {
+		fmt.Fprintf(os.Stderr, "reading %s: %v\n", rest[1], err)
+		os.Exit(1)
+	}
+
+	d := observe.Diff(a, b)
+	if *asJSON {
+		printJSON(d)
+		return
+	}
+	fmt.Printf("A%s  vs  B%s\n\n", labelSuffix(a.Label), labelSuffix(b.Label))
+	fmt.Printf("  TPS mean:       %.2f → %.2f  (%+.2f)\n", a.TPSMean, b.TPSMean, d.TPSMeanDelta)
+	fmt.Printf("  MSPT mean:      %.2f → %.2f ms  (%+.2f)\n", a.MSPTMean, b.MSPTMean, d.MSPTMeanDelta)
+	fmt.Printf("  MSPT p95:       %.2f → %.2f ms  (%+.2f)\n", a.MSPTP95, b.MSPTP95, d.MSPTP95Delta)
+	fmt.Printf("  CPU pressure:   %.1f%% → %.1f%%  (%+.1fpp)\n", a.CPUPressureMean, b.CPUPressureMean, d.CPUPressureMeanDelta)
+	fmt.Printf("  I/O pressure:   %.1f%% → %.1f%%  (%+.1fpp)\n", a.IOPressureMean, b.IOPressureMean, d.IOPressureMeanDelta)
+	fmt.Printf("\n  → %s\n", d.Verdict)
+	for _, n := range d.Notes {
+		fmt.Printf("  ⚠ %s\n", n)
+	}
+}
+
+func writeJSONFile(path string, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o644)
+}
+
+func readJSONFile(path string, v any) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
 }
 
 func labelSuffix(s string) string {

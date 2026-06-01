@@ -2,6 +2,7 @@ package observe
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 )
@@ -11,20 +12,20 @@ import (
 // point — a benchmark that only reported TPS would miss that the box was
 // starved, which is the very confound this tool exists to expose.
 type BenchStats struct {
-	Label    string            `json:"label"`
-	Samples  int               `json:"samples"`
-	Duration string            `json:"duration"`
-	TPSMin   float64           `json:"tps_min"`
-	TPSMean  float64           `json:"tps_mean"`
-	MSPTMean float64           `json:"mspt_mean"`
-	MSPTP95  float64           `json:"mspt_p95"`
-	MSPTMax  float64           `json:"mspt_max"`
-	CPUPressureMean float64    `json:"cpu_pressure_mean"`
-	CPUPressurePeak float64    `json:"cpu_pressure_peak"`
-	IOPressureMean  float64    `json:"io_pressure_mean"`
-	IOPressurePeak  float64    `json:"io_pressure_peak"`
-	MemPressurePeak float64    `json:"mem_pressure_peak"`
-	ThrottledDelta  uint64     `json:"throttled_delta"` // throttle events during the window
+	Label           string          `json:"label"`
+	Samples         int             `json:"samples"`
+	Duration        string          `json:"duration"`
+	TPSMin          float64         `json:"tps_min"`
+	TPSMean         float64         `json:"tps_mean"`
+	MSPTMean        float64         `json:"mspt_mean"`
+	MSPTP95         float64         `json:"mspt_p95"`
+	MSPTMax         float64         `json:"mspt_max"`
+	CPUPressureMean float64         `json:"cpu_pressure_mean"`
+	CPUPressurePeak float64         `json:"cpu_pressure_peak"`
+	IOPressureMean  float64         `json:"io_pressure_mean"`
+	IOPressurePeak  float64         `json:"io_pressure_peak"`
+	MemPressurePeak float64         `json:"mem_pressure_peak"`
+	ThrottledDelta  uint64          `json:"throttled_delta"` // throttle events during the window
 	Verdicts        map[Verdict]int `json:"verdicts"`
 }
 
@@ -114,6 +115,84 @@ func summarize(samples []Sample, label string, interval time.Duration, firstThro
 	st.IOPressureMean = ioSum / n
 	st.MSPTP95 = percentile(mspts, 95)
 	return st
+}
+
+// BenchDiff compares two benchmark runs (A = before, B = after a change).
+type BenchDiff struct {
+	A, B                 BenchStats `json:"-"`
+	TPSMeanDelta         float64    `json:"tps_mean_delta"`
+	MSPTMeanDelta        float64    `json:"mspt_mean_delta"` // negative = faster (good)
+	MSPTP95Delta         float64    `json:"mspt_p95_delta"`
+	CPUPressureMeanDelta float64    `json:"cpu_pressure_mean_delta"`
+	IOPressureMeanDelta  float64    `json:"io_pressure_mean_delta"`
+	Verdict              string     `json:"verdict"`
+	Trustworthy          bool       `json:"trustworthy"`
+	Notes                []string   `json:"notes"`
+}
+
+// Thresholds for calling a difference real rather than noise.
+const (
+	msptNoiseMs       = 0.5  // sub-0.5ms MSPT moves are noise
+	msptNoiseFraction = 0.05 // ...or moves under 5%
+	pressureConfound  = 5.0  // >5pp pressure difference means the load wasn't constant
+)
+
+// Diff compares two runs and, crucially, refuses to trust the comparison if the
+// host pressure differed between them — because then any TPS/MSPT change might
+// just reflect what else the box was doing, not the tuning. That confound is
+// exactly what every naive before/after benchmark misses.
+func Diff(a, b BenchStats) BenchDiff {
+	d := BenchDiff{
+		A:                    a,
+		B:                    b,
+		TPSMeanDelta:         b.TPSMean - a.TPSMean,
+		MSPTMeanDelta:        b.MSPTMean - a.MSPTMean,
+		MSPTP95Delta:         b.MSPTP95 - a.MSPTP95,
+		CPUPressureMeanDelta: b.CPUPressureMean - a.CPUPressureMean,
+		IOPressureMeanDelta:  b.IOPressureMean - a.IOPressureMean,
+		Trustworthy:          true,
+	}
+
+	if abs(d.CPUPressureMeanDelta) > pressureConfound {
+		d.Trustworthy = false
+		d.Notes = append(d.Notes, fmt.Sprintf("host CPU pressure differed by %.1fpp between runs (A=%.1f%%, B=%.1f%%) — the load wasn't constant; this comparison may reflect host conditions, not your tuning", d.CPUPressureMeanDelta, a.CPUPressureMean, b.CPUPressureMean))
+	}
+	if abs(d.IOPressureMeanDelta) > pressureConfound {
+		d.Trustworthy = false
+		d.Notes = append(d.Notes, fmt.Sprintf("host I/O pressure differed by %.1fpp between runs (A=%.1f%%, B=%.1f%%) — re-run under a constant load", d.IOPressureMeanDelta, a.IOPressureMean, b.IOPressureMean))
+	}
+	if a.Samples < 10 || b.Samples < 10 {
+		d.Notes = append(d.Notes, "small sample (<10) — treat the result as directional, not precise")
+	}
+
+	// MSPT (mean tick time) is the sensitive signal; TPS is usually pinned at 20.
+	meaningful := abs(d.MSPTMeanDelta) > msptNoiseMs && abs(d.MSPTMeanDelta) > a.MSPTMean*msptNoiseFraction
+	switch {
+	case !meaningful:
+		d.Verdict = "no meaningful tick-time difference (within noise)"
+	case d.MSPTMeanDelta < 0:
+		d.Verdict = fmt.Sprintf("B is faster: mean tick %.2f→%.2f ms (%.1f%%)", a.MSPTMean, b.MSPTMean, pct(d.MSPTMeanDelta, a.MSPTMean))
+	default:
+		d.Verdict = fmt.Sprintf("B is slower: mean tick %.2f→%.2f ms (+%.1f%%)", a.MSPTMean, b.MSPTMean, pct(d.MSPTMeanDelta, a.MSPTMean))
+	}
+	if !d.Trustworthy {
+		d.Verdict = "INCONCLUSIVE — " + d.Verdict
+	}
+	return d
+}
+
+func abs(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
+}
+
+func pct(delta, base float64) float64 {
+	if base == 0 {
+		return 0
+	}
+	return delta / base * 100
 }
 
 func percentile(xs []float64, p float64) float64 {

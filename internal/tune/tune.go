@@ -24,12 +24,25 @@ const (
 	Contested Confidence = "contested" // folklore; validate against your load
 )
 
+// Target says where a recommendation is applied — which is what decides
+// whether `tune --apply` can write it automatically or can only advise.
+type Target string
+
+const (
+	TargetProperties Target = "server.properties" // a key in server.properties — auto-appliable
+	TargetJVM        Target = "jvm-flags"         // a JVM flag in the launch command/unit
+	TargetModConfig  Target = "mod-config"        // a mod's config file (e.g. c2me.toml)
+	TargetManual     Target = "manual"            // requires a human (e.g. swapping a mod jar)
+	TargetInfo       Target = "info"              // an observation/warning, nothing to apply
+)
+
 // Rec is a single tuning recommendation.
 type Rec struct {
 	Key        string     `json:"key"`
 	Value      string     `json:"value"`
 	Reason     string     `json:"reason"`
 	Confidence Confidence `json:"confidence"`
+	Target     Target     `json:"target"`
 }
 
 // Plan is the full set of recommendations for a host.
@@ -43,8 +56,8 @@ const gib = 1 << 30
 // Recommend runs the rules engine over a profile.
 func Recommend(p detect.Profile) Plan {
 	plan := Plan{Profile: p}
-	add := func(k, v, reason string, c Confidence) {
-		plan.Recs = append(plan.Recs, Rec{Key: k, Value: v, Reason: reason, Confidence: c})
+	add := func(k, v, reason string, c Confidence, t Target) {
+		plan.Recs = append(plan.Recs, Rec{Key: k, Value: v, Reason: reason, Confidence: c, Target: t})
 	}
 
 	// --- Heap sizing ---------------------------------------------------------
@@ -55,14 +68,14 @@ func Recommend(p detect.Profile) Plan {
 	budget := p.MemoryBudgetBytes
 	heap := heapForBudget(budget)
 	if budget == 0 {
-		add("Xmx/Xms", "unknown", "couldn't read a memory budget; deploy on the Linux target to size the heap", Contested)
+		add("Xmx/Xms", "unknown", "couldn't read a memory budget; deploy on the Linux target to size the heap", Contested, TargetInfo)
 	} else {
 		heapGiB := float64(heap) / gib
 		add("Xmx", fmt.Sprintf("%.0fG", heapGiB),
 			fmt.Sprintf("budget %.1f GiB; reserve the rest for off-heap (Netty/mmap/metaspace) and the OS page cache that keeps chunk reads warm", float64(budget)/gib),
-			Solid)
+			Solid, TargetJVM)
 		add("Xms", fmt.Sprintf("%.0fG", heapGiB),
-			"pin Xms == Xmx (Aikar): pre-committing the heap avoids GC churn from growing it under load", Solid)
+			"pin Xms == Xmx (Aikar): pre-committing the heap avoids GC churn from growing it under load", Solid, TargetJVM)
 	}
 
 	// --- Garbage collector ---------------------------------------------------
@@ -72,10 +85,10 @@ func Recommend(p detect.Profile) Plan {
 	if heap > 0 {
 		if heap >= 12*gib {
 			add("gc", "Generational ZGC (-XX:+UseZGC -XX:+ZGenerational)",
-				"heap >= 12 GiB: ZGC's pause times stay sub-ms where G1 starts producing TPS-visible stop-the-world pauses", Heuristic)
+				"heap >= 12 GiB: ZGC's pause times stay sub-ms where G1 starts producing TPS-visible stop-the-world pauses", Heuristic, TargetJVM)
 		} else {
 			add("gc", "G1 + Aikar flags",
-				"heap < 12 GiB: G1 with Aikar's tuned flags is the proven low-risk default at this size", Solid)
+				"heap < 12 GiB: G1 with Aikar's tuned flags is the proven low-risk default at this size", Solid, TargetJVM)
 		}
 	}
 
@@ -86,9 +99,9 @@ func Recommend(p detect.Profile) Plan {
 	cores := p.EffectiveCores
 	view, sim := distancesForCores(cores)
 	add("view-distance", fmt.Sprintf("%d", view),
-		"view distance mostly costs bandwidth + chunk sends, not CPU; can run higher than sim", Heuristic)
+		"view distance mostly costs bandwidth + chunk sends, not CPU; can run higher than sim", Heuristic, TargetProperties)
 	add("simulation-distance", fmt.Sprintf("%d", sim),
-		"sim distance drives entity/redstone/AI ticking — the real per-tick CPU cost; keep it below view distance", Solid)
+		"sim distance drives entity/redstone/AI ticking — the real per-tick CPU cost; keep it below view distance", Solid, TargetProperties)
 
 	// --- Chunk system parallelism (C2ME) -------------------------------------
 	// Size worker pools to effective cores but always leave the main server
@@ -97,11 +110,11 @@ func Recommend(p detect.Profile) Plan {
 		workers := int(math.Max(2, math.Floor(cores)-2))
 		add("c2me.threads", fmt.Sprintf("%d", workers),
 			fmt.Sprintf("%.1f effective cores: leave ~2 for the main tick thread + GC so chunk gen doesn't starve the loop it feeds", cores),
-			Heuristic)
+			Heuristic, TargetModConfig)
 	} else {
 		add("c2me", "consider disabling",
 			fmt.Sprintf("only %.1f effective cores: parallel chunk I/O contends with the main thread more than it helps", cores),
-			Heuristic)
+			Heuristic, TargetModConfig)
 	}
 
 	// --- Lighting engine (the contested one) ---------------------------------
@@ -111,28 +124,28 @@ func Recommend(p detect.Profile) Plan {
 	if cores >= 8 {
 		add("lighting-engine", "ScalableLux",
 			fmt.Sprintf("%.0f cores: parallel lighting *should* beat single-threaded Starlight here — but this crossover is folklore, benchmark it", cores),
-			Contested)
+			Contested, TargetManual)
 	} else {
 		add("lighting-engine", "Starlight",
 			fmt.Sprintf("%.0f effective cores: not enough parallelism to amortize ScalableLux's coordination; Starlight's faster single-thread path wins", cores),
-			Contested)
+			Contested, TargetManual)
 	}
 
 	// --- Storage -------------------------------------------------------------
 	if p.StorageRotational != nil {
 		if *p.StorageRotational {
 			add("storage-warning", "rotational disk detected",
-				"region-file I/O on spinning rust will stall the tick thread on chunk save/load; lower view+sim distance and watch io.pressure", Solid)
+				"region-file I/O on spinning rust will stall the tick thread on chunk save/load; lower view+sim distance and watch io.pressure", Solid, TargetInfo)
 		} else {
 			add("storage", "SSD/NVMe",
-				"low-latency storage: chunk I/O is unlikely to be your tick bottleneck", Solid)
+				"low-latency storage: chunk I/O is unlikely to be your tick bottleneck", Solid, TargetInfo)
 		}
 	}
 
 	// --- Container caveat ----------------------------------------------------
 	if p.Virt == detect.VirtLXC || p.Virt == detect.VirtDocker {
 		add("note:contention", string(p.Virt),
-			"containerized: a quiet modpack can still stutter if a neighbor saturates the shared CPU/IO pool — run `tickwarden watch` to catch host-side starvation", Solid)
+			"containerized: a quiet modpack can still stutter if a neighbor saturates the shared CPU/IO pool — run `tickwarden watch` to catch host-side starvation", Solid, TargetInfo)
 	}
 
 	return plan

@@ -59,5 +59,5 @@ func (r *SparkHTTPReader) Read() (float64, float64, error) {
 // loop and PSI correlation without a live server wired up.
 type StubReader struct{}
 
-func (StubReader) Name() string                       { return "stub" }
-func (StubReader) Read() (float64, float64, error)     { return 20.0, 50.0, nil }
+func (StubReader) Name() string                    { return "stub" }
+func (StubReader) Read() (float64, float64, error) { return 20.0, 50.0, nil }

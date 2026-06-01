@@ -10,10 +10,10 @@ import (
 type Verdict string
 
 const (
-	Healthy      Verdict = "healthy"       // TPS fine
-	HostStarved  Verdict = "host-starved"  // TPS low AND cgroup under pressure/throttled
-	GameBound    Verdict = "game-bound"    // TPS low but no host pressure → it's the modpack/world
-	Unknown      Verdict = "unknown"       // TPS low, pressure unreadable
+	Healthy     Verdict = "healthy"      // TPS fine
+	HostStarved Verdict = "host-starved" // TPS low AND cgroup under pressure/throttled
+	GameBound   Verdict = "game-bound"   // TPS low but no host pressure → it's the modpack/world
+	Unknown     Verdict = "unknown"      // TPS low, pressure unreadable
 )
 
 // Sample is one correlated observation.

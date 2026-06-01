@@ -33,11 +33,11 @@ const (
 
 // Profile is the detected hardware/limit picture the tuner reasons over.
 type Profile struct {
-	OS            string  `json:"os"`
-	Virt          Virt    `json:"virt"`
-	CPUModel      string  `json:"cpu_model"`
-	LogicalCores  int     `json:"logical_cores"`
-	PhysicalCores int     `json:"physical_cores"`
+	OS            string `json:"os"`
+	Virt          Virt   `json:"virt"`
+	CPUModel      string `json:"cpu_model"`
+	LogicalCores  int    `json:"logical_cores"`
+	PhysicalCores int    `json:"physical_cores"`
 	// EffectiveCores is the parallelism the process can actually use: the
 	// cgroup CPU quota when one is set, otherwise the logical core count.
 	// This — not the physical core count — is what thread pools should size to.
@@ -48,8 +48,8 @@ type Profile struct {
 	CgroupMemLimit uint64  `json:"cgroup_mem_limit_bytes"` // 0 = unlimited
 	// MemoryBudgetBytes is the RAM the process should plan around: the cgroup
 	// memory limit when set, otherwise total host RAM.
-	MemoryBudgetBytes uint64 `json:"memory_budget_bytes"`
-	StorageRotational *bool  `json:"storage_rotational"` // nil = couldn't determine
+	MemoryBudgetBytes uint64   `json:"memory_budget_bytes"`
+	StorageRotational *bool    `json:"storage_rotational"` // nil = couldn't determine
 	Notes             []string `json:"notes,omitempty"`
 }
 

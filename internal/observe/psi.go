@@ -6,10 +6,10 @@
 // being starved. cgroup-v2 exposes Pressure Stall Information (PSI) and CPU
 // throttling for your own cgroup, readable from inside the container:
 //
-//   /sys/fs/cgroup/<self>/cpu.pressure
-//   /sys/fs/cgroup/<self>/io.pressure
-//   /sys/fs/cgroup/<self>/memory.pressure
-//   /sys/fs/cgroup/<self>/cpu.stat   (nr_throttled, throttled_usec)
+//	/sys/fs/cgroup/<self>/cpu.pressure
+//	/sys/fs/cgroup/<self>/io.pressure
+//	/sys/fs/cgroup/<self>/memory.pressure
+//	/sys/fs/cgroup/<self>/cpu.stat   (nr_throttled, throttled_usec)
 //
 // So when a noisy neighbor (say, a torrent client) saturates a shared pool, the
 // symptom — your cgroup's io.pressure spiking or your CPU quota getting
@@ -119,8 +119,9 @@ func ReadPressure() Pressure {
 }
 
 // readPSIFile parses a PSI file. Format per line:
-//   some avg10=0.00 avg60=0.00 avg300=0.00 total=0
-//   full avg10=0.00 ...
+//
+//	some avg10=0.00 avg60=0.00 avg300=0.00 total=0
+//	full avg10=0.00 ...
 func readPSIFile(path string) PSI {
 	b, err := os.ReadFile(path)
 	if err != nil {
