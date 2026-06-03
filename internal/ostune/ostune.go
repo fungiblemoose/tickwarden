@@ -25,20 +25,23 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/fungiblemoose/tickwarden/internal/confidence"
 )
 
-// Confidence flags how much to trust a finding. Kept as local consts rather than
-// importing tune's type: ostune reasons about kernel knobs, a different domain.
-type Confidence string
+// Confidence flags how much to trust a finding. Aliased from the shared
+// confidence package; the const names below stay local for readability, but the
+// type and values are the same ones tune uses, so reports read consistently.
+type Confidence = confidence.Confidence
 
 const (
 	// Solid: well-established, low-risk for a latency-sensitive single-thread
 	// workload (governor, swappiness, THP).
-	Solid Confidence = "solid"
+	Solid = confidence.Solid
 	// Heuristic: a sane default, but validate against your load (I/O scheduler).
-	Heuristic Confidence = "heuristic"
+	Heuristic = confidence.Heuristic
 	// Contested: folklore or genuinely workload-dependent; the Reason says why.
-	Contested Confidence = "contested"
+	Contested = confidence.Contested
 )
 
 // Finding describes one suboptimal kernel knob and how to fix it. A knob that is

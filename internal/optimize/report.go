@@ -138,9 +138,10 @@ func measuredTag(measured bool) string {
 	return "assumed — not measured"
 }
 
-// giB and rotational mirror main.go's display helpers; Report can't reach those
-// (they're in package main), so the formatting lives here too. Kept identical so
-// `optimize` reads the same as `detect`/`tune`.
+// giB and rotational format the system-summary line for the optimize report.
+// They parallel main.go's display helpers but are deliberately worded for this
+// report (e.g. "unknown memory" vs main.go's "(unknown)"); Report can't reach
+// package main's copies anyway, so the formatting lives here.
 func giB(b uint64) string {
 	if b == 0 {
 		return "unknown memory"

@@ -12,16 +12,19 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/fungiblemoose/tickwarden/internal/confidence"
 	"github.com/fungiblemoose/tickwarden/internal/detect"
 )
 
-// Confidence flags how much to trust a recommendation.
-type Confidence string
+// Confidence flags how much to trust a recommendation. Aliased from the shared
+// confidence package so the const names below (Solid/Heuristic/Contested) and
+// existing callers keep working unchanged.
+type Confidence = confidence.Confidence
 
 const (
-	Solid     Confidence = "solid"     // well-established, low risk
-	Heuristic Confidence = "heuristic" // reasonable default, tune to taste
-	Contested Confidence = "contested" // folklore; validate against your load
+	Solid     = confidence.Solid     // well-established, low risk
+	Heuristic = confidence.Heuristic // reasonable default, tune to taste
+	Contested = confidence.Contested // folklore; validate against your load
 )
 
 // Target says where a recommendation is applied — which is what decides
