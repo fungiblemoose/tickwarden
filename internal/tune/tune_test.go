@@ -131,6 +131,18 @@ func TestLightingAlwaysScalableLux(t *testing.T) {
 	}
 }
 
+// Settled (survival, no flying gen spikes) relaxes the flying-worst-case budget,
+// so it should raise sim and never lower it. 3 cores / 3 players: spread flying
+// gives sim 8, settled gives 11.
+func TestSettledRaisesSim(t *testing.T) {
+	p := detect.Profile{EffectiveCores: 3, MemoryBudgetBytes: 8 << 30}
+	flying, _ := recVal(t, p, Options{Players: 3, PerfMods: true}, "simulation-distance")
+	settled, _ := recVal(t, p, Options{Players: 3, PerfMods: true, Settled: true}, "simulation-distance")
+	if flying != "8" || settled != "11" {
+		t.Fatalf("3 cores/3 players: want flying sim=8, settled sim=11; got %q / %q", flying, settled)
+	}
+}
+
 func TestSimClamped(t *testing.T) {
 	// Huge cores, one player must not produce an absurd sim distance.
 	if got := simFor(t, 64, 1, true); got > 16 {

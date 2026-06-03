@@ -105,6 +105,15 @@ variable.
 > `tune -players-url <endpoint>` sizes to the server's *measured* peak instead
 > of a guess — configure for the load you actually get, not an assumed one.
 
+> **Play style (`-settled`):** the default budget is the FLYING worst case —
+> limited by chunk-*generation* spikes when players cross chunks fast, not by
+> simulation cost. Survival play in pregenerated terrain (walking, not flying)
+> avoids those spikes (the A/B's stationary bot held sim-10 at a flat 6 ms,
+> sim-14 at 9 ms, no spikes), so `-settled` roughly doubles the budget. Marked
+> `contested`: the 2× is reasoned from the gen-spike data, not cleanly A/B'd
+> (Carpet bots walk too slowly to reproduce flying gen load directly). Only set
+> it if players stay in pregenerated/known terrain at survival speeds.
+
 **Still folklore:** `budgetPerCore` and the perf-mod multiplier are anchored to
 ONE validated data point (see the calibration log) and otherwise extrapolated.
 The exponent (sim²) is sound; the constant needs more `bench` points.

@@ -40,6 +40,10 @@ type Options struct {
 	// the tuner afford a higher simulation distance. Default false is the
 	// conservative (spread-out) assumption — see tune.Options.
 	Clustered bool
+	// Settled means survival play in pregenerated terrain (not flying), which
+	// avoids the generation spikes the default sizing guards against — see
+	// tune.Options. Default false keeps the safe flying-worst-case sizing.
+	Settled bool
 }
 
 // Result is everything Analyze gathered, kept structured so callers can render
@@ -80,6 +84,7 @@ func Analyze(opts Options) (Result, error) {
 	// and is documented in Report's mods section so the operator can correct it.
 	topts := tune.DefaultOptions()
 	topts.Clustered = opts.Clustered
+	topts.Settled = opts.Settled
 
 	// Players: 0 means "tuner default" (DefaultOptions, not Recommend's clamp-to-1).
 	if opts.Players > 0 {

@@ -108,6 +108,7 @@ func cmdOptimize(args []string) {
 	players := fs.Int("players", 0, "expected PEAK players (0 => default friends-server sizing)")
 	playersURL := fs.String("players-url", "", "companion endpoint for the MEASURED peak (overrides -players)")
 	clustered := fs.Bool("clustered", false, "players congregate (shared base/hub) rather than scatter")
+	settled := fs.Bool("settled", false, "survival play in pregenerated terrain (not flying/exploring) — relaxes the flying-worst-case sizing")
 	doApply := fs.Bool("apply", false, "apply the server.properties recommendations (dry-run unless -write)")
 	write := fs.Bool("write", false, "with -apply, actually write the file (after a .bak backup)")
 	props := fs.String("properties", "server.properties", "path to server.properties")
@@ -115,7 +116,7 @@ func cmdOptimize(args []string) {
 	fs.Parse(args)
 
 	res, err := optimize.Analyze(optimize.Options{
-		ModsDir: *modsDir, Players: *players, PlayersURL: *playersURL, Clustered: *clustered,
+		ModsDir: *modsDir, Players: *players, PlayersURL: *playersURL, Clustered: *clustered, Settled: *settled,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "optimize failed:", err)
@@ -171,6 +172,7 @@ func cmdTune(args []string) {
 	playersURL := fs.String("players-url", "", "companion endpoint to read the OBSERVED peak player count from (overrides -players)")
 	modsDir := fs.String("mods-dir", "", "scan this server mods/ dir to auto-set -perf-mods from installed mods")
 	clustered := fs.Bool("clustered", false, "players congregate (shared base/hub) rather than scatter — allows a higher sim distance")
+	settled := fs.Bool("settled", false, "survival play in pregenerated terrain (not flying/exploring) — relaxes flying-worst-case sizing")
 	fs.Parse(args)
 
 	if *revert {
@@ -182,7 +184,7 @@ func cmdTune(args []string) {
 		return
 	}
 
-	opts := tune.Options{Players: *players, PerfMods: *perfMods, Clustered: *clustered}
+	opts := tune.Options{Players: *players, PerfMods: *perfMods, Clustered: *clustered, Settled: *settled}
 	if *modsDir != "" {
 		mods, err := detect.ScanMods(*modsDir)
 		if err != nil {

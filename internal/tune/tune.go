@@ -74,6 +74,15 @@ type Options struct {
 	// distance. Default false is the CONSERVATIVE assumption (size for spread);
 	// set it only when you know the social shape of your server.
 	Clustered bool
+	// Settled means survival-style play within already-generated terrain (walking,
+	// not flying or elytra-exploring into fresh chunks). The default calibration
+	// is the FLYING worst case, which is limited by chunk-*generation* spikes, not
+	// by simulation cost. A stationary/walking player in pregenerated chunks
+	// avoids those spikes entirely (measured: sim-10 steady ≈ 6 ms, sim-14 ≈ 9 ms,
+	// no spikes), so the real budget for simulation distance is roughly double.
+	// Default false keeps the safe flying-worst-case sizing. Set it only if your
+	// players stay in pregenerated/known terrain at survival speeds.
+	Settled bool
 }
 
 // DefaultOptions assumes a small friends-server with perf mods — the common
@@ -130,13 +139,17 @@ func Recommend(p detect.Profile, opts Options) Plan {
 	// chunks). Keep sim < view.
 	cores := p.EffectiveCores
 	ssd := p.StorageRotational != nil && !*p.StorageRotational
-	view, sim := distancesFor(cores, opts.Players, opts.PerfMods, opts.Clustered, ssd)
+	view, sim := distancesFor(cores, opts.Players, opts.PerfMods, opts.Clustered, opts.Settled, ssd)
 	add("view-distance", fmt.Sprintf("%d", view),
 		"maxed for render range — view distance costs bandwidth + RAM, not tick CPU (cheap disk loads over pregenerated chunks on SSD); pushed well above sim", Heuristic, TargetProperties)
+	simConf := Solid
+	if opts.Settled {
+		simConf = Contested // the ~2x settled budget is reasoned from gen-spike data, not yet cleanly A/B'd
+	}
 	add("simulation-distance", fmt.Sprintf("%d", sim),
-		fmt.Sprintf("sized for %s%d peak players on %.1f cores%s%s: per-tick cost scales with players × sim², so safe sim ∝ sqrt(budget/players); validate with `bench`",
-			autoTag(opts.PlayersAuto), opts.Players, cores, perfModsTag(opts.PerfMods), clusteredTag(opts.Clustered)),
-		Solid, TargetProperties)
+		fmt.Sprintf("sized for %s%d peak players on %.1f cores%s%s%s: per-tick cost scales with players × sim², so safe sim ∝ sqrt(budget/players); validate with `bench`",
+			autoTag(opts.PlayersAuto), opts.Players, cores, perfModsTag(opts.PerfMods), clusteredTag(opts.Clustered), settledTag(opts.Settled)),
+		simConf, TargetProperties)
 
 	// --- Chunk system parallelism (C2ME) -------------------------------------
 	// C2ME moves chunk generation and I/O off the single main tick thread, so it
@@ -252,13 +265,21 @@ func heapFor(budget uint64, players int) uint64 {
 // is gated so that the default (spread) path is byte-identical to that anchor.
 // Re-derive this constant if `bench` ever contradicts it; see
 // docs/DECISION_TREE.md.
-func distancesFor(cores float64, players int, perfMods, clustered, ssd bool) (view, sim int) {
+func distancesFor(cores float64, players int, perfMods, clustered, settled, ssd bool) (view, sim int) {
 	if players < 1 {
 		players = 1
 	}
 	budgetPerCore := 64.0
 	if !perfMods {
 		budgetPerCore = 32.0 // vanilla gen hits the main thread; ~halve the budget
+	}
+	if settled {
+		// The default budget is the flying worst case (gen-spike limited). Settled
+		// survival play in pregenerated terrain avoids those spikes, so the
+		// simulation budget roughly doubles. CONTESTED: reasoned from the gen-spike
+		// data, not yet cleanly A/B'd (Carpet bots walk too slowly to reproduce
+		// flying gen load for a direct measurement).
+		budgetPerCore *= 2.0
 	}
 	effPlayers := players
 	if clustered {
@@ -305,6 +326,13 @@ func perfModsTag(perfMods bool) string {
 		return " (with perf mods)"
 	}
 	return " (no perf mods)"
+}
+
+func settledTag(settled bool) string {
+	if settled {
+		return ", settled/survival budget (~2x — no flying gen spikes)"
+	}
+	return ""
 }
 
 func clusteredTag(clustered bool) string {
