@@ -216,9 +216,18 @@ Validated data points so far:
 > **Why the sim-distance ceiling still isn't freshly A/B'd:** `loadtest` drives
 > chunk *generation*, which this box no longer chokes on. Simulation distance
 > costs come from *ticking entities* in the loaded area, so settling sim-10 vs.
-> sim-12 needs an entity/player load (mob farms, or fake-player bots) that Chunky
-> can't fake. The sim ceiling stays anchored to the original spark-during-flight
-> measurement until such a load exists.
+> sim-12 needs an entity/player load that Chunky can't fake.
+>
+> The `loadtest -load entity` mode (force-load + summon AI mobs) was the first
+> attempt. It confirmed the important thing — **simulation cost is main-thread
+> bound: it shows up as MSPT, not CPU pressure** (500 crowded villagers ≈ 28 ms
+> mean tick, ~46 ms peak, with CPU pressure under 2%). But summoned mobs proved a
+> poor *dial*: villager AI cost is collision-dominated (crowded = expensive but
+> self-limiting; spread = nearly free), placement is Y-sensitive, and force-loading
+> near spawn accumulates natural mobs (now suppressed during a run). A clean
+> sim-distance A/B needs a real player-sized sim bubble — **Carpet fake-players** —
+> which is the proper next tool. Until then the sim ceiling stays anchored to the
+> original spark-during-flight measurement.
 
 **Open calibrations needing data** (run `bench-diff` to settle):
 - Lighting parallel-vs-single-thread benefit by core count (rule 5) — no longer

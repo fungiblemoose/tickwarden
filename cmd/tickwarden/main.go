@@ -416,17 +416,25 @@ func cmdHost(args []string) {
 
 func cmdLoadtest(args []string) {
 	fs := flag.NewFlagSet("loadtest", flag.ExitOnError)
+	loadType := fs.String("load", "chunky", "load type: chunky (generation) | entity (simulation/tick)")
 	rconAddr := fs.String("rcon-addr", "127.0.0.1:25575", "RCON address of the target server")
 	tpsURL := fs.String("tps-url", "http://127.0.0.1:9225/tps", "companion TPS endpoint to sample")
-	world := fs.String("world", "minecraft:overworld", "world to pregen")
-	cx := fs.Int("center-x", 100000, "Chunky center X — pick FAR/unexplored terrain to force real generation")
-	cz := fs.Int("center-z", 100000, "Chunky center Z")
-	radius := fs.Int("radius-chunks", 16, "Chunky pregen radius in chunks")
+	world := fs.String("world", "minecraft:overworld", "world to pregen (chunky load)")
+	cx := fs.Int("center-x", 100000, "center X — for chunky, pick FAR/unexplored terrain to force generation")
+	cz := fs.Int("center-z", 100000, "center Z")
+	radius := fs.Int("radius-chunks", 16, "Chunky pregen radius in chunks (chunky load)")
+	entityType := fs.String("entity-type", "minecraft:villager", "mob to summon (entity load) — pick one with AI")
+	entityY := fs.Int("entity-y", 70, "Y to summon at — pick a valid surface (entity load)")
+	entityCount := fs.Int("entity-count", 200, "how many AI mobs to summon (entity load)")
 	duration := fs.Duration("duration", 30*time.Second, "measurement + load window")
 	interval := fs.Duration("interval", time.Second, "bench sampling interval")
 	label := fs.String("label", "", "label for this run")
 	out := fs.String("out", "", "write the bench stats JSON here (for bench-diff)")
 	fs.Parse(args)
+	if *loadType != "chunky" && *loadType != "entity" {
+		fmt.Fprintln(os.Stderr, "-load must be 'chunky' or 'entity'")
+		os.Exit(2)
+	}
 
 	// Read the RCON password from the environment, never a flag: process args are
 	// world-readable (`ps`), and leaking a server credential there is exactly the
@@ -443,12 +451,22 @@ func cmdLoadtest(args []string) {
 	}
 	defer client.Close()
 
-	// Drive the controlled load concurrently so generation spans the whole
-	// measurement window (with a small margin on each end).
+	// Drive the controlled load concurrently so it spans the whole measurement
+	// window (with a small margin on each end).
+	loadWindow := *duration + 2*time.Second
 	loadErr := make(chan error, 1)
-	go func() {
-		loadErr <- loadgen.ChunkyBurst(client, *world, *cx, *cz, *radius, *duration+2*time.Second)
-	}()
+	var loadDesc string
+	if *loadType == "entity" {
+		loadDesc = fmt.Sprintf("%d %s at (%d,%d,%d) [simulation load]", *entityCount, *entityType, *cx, *entityY, *cz)
+		go func() {
+			loadErr <- loadgen.EntityLoad(client, *entityType, *cx, *entityY, *cz, *entityCount, loadWindow)
+		}()
+	} else {
+		loadDesc = fmt.Sprintf("Chunky burst at (%d,%d) r=%d chunks [generation load]", *cx, *cz, *radius)
+		go func() {
+			loadErr <- loadgen.ChunkyBurst(client, *world, *cx, *cz, *radius, loadWindow)
+		}()
+	}
 
 	reader := observe.NewSparkHTTPReader(*tpsURL)
 	count := int(*duration / *interval)
@@ -457,7 +475,7 @@ func cmdLoadtest(args []string) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	fmt.Fprintf(os.Stderr, "loadtest: Chunky burst at (%d,%d) r=%d chunks while sampling %d×%s\n", *cx, *cz, *radius, count, *interval)
+	fmt.Fprintf(os.Stderr, "loadtest: %s while sampling %d×%s\n", loadDesc, count, *interval)
 
 	stats, _ := observe.Bench(ctx, reader, observe.DefaultThresholds(), *interval, count, *label, time.Now)
 	if err := <-loadErr; err != nil {

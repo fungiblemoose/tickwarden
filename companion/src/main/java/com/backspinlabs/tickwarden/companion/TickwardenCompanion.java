@@ -13,6 +13,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -55,10 +57,14 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
     private volatile double mspt = 0.0;
     private volatile double tps = 20.0;
     // Player load — tickwarden uses the peak to size view/simulation distance to
-    // the server's ACTUAL load instead of a guess. peak is the max simultaneous
-    // count seen since startup (resets on restart; persisting it is a TODO).
+    // the server's ACTUAL load instead of a guess. The peak is PERSISTED across
+    // restarts (a fresh restart would otherwise read 0 and make the tuner
+    // over-aggressive until players happen to log in again).
     private volatile int players = 0;
     private volatile int playersPeak = 0;
+    // Where the peak survives a restart. Relative path resolves to the server's
+    // working directory (e.g. /opt/minecraft); a plain integer, easy to inspect.
+    private static final Path PEAK_FILE = Path.of("tickwarden-players-peak.txt");
 
     // Rolling snapshot of the top loaded chunks by block-entity count. Written
     // by the server thread on the sample tick, read by the HTTP handler thread.
@@ -82,7 +88,10 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
                 sampleHotspots(server);
             }
         });
-        ServerLifecycleEvents.SERVER_STARTED.register(server -> startHttp());
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            loadPeak();
+            startHttp();
+        });
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> stopHttp());
     }
 
@@ -90,6 +99,7 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
         players = playerCount;
         if (playerCount > playersPeak) {
             playersPeak = playerCount;
+            savePeak(); // only on a new high-water mark — writes are rare
         }
         if (tickStartNanos == 0) {
             return;
@@ -139,6 +149,29 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
                 ? new ArrayList<>(found.subList(0, HOTSPOT_TOP_N))
                 : found;
         hotspots = Collections.unmodifiableList(top);
+    }
+
+    /** Restore the persisted peak so a restart doesn't reset it to 0. */
+    private void loadPeak() {
+        try {
+            if (Files.exists(PEAK_FILE)) {
+                int saved = Integer.parseInt(Files.readString(PEAK_FILE).trim());
+                if (saved > playersPeak) {
+                    playersPeak = saved;
+                }
+            }
+        } catch (IOException | NumberFormatException e) {
+            System.err.println("[tickwarden-companion] couldn't read " + PEAK_FILE + ": " + e.getMessage());
+        }
+    }
+
+    /** Persist the new high-water mark. Called only when the peak rises. */
+    private void savePeak() {
+        try {
+            Files.writeString(PEAK_FILE, Integer.toString(playersPeak));
+        } catch (IOException e) {
+            System.err.println("[tickwarden-companion] couldn't write " + PEAK_FILE + ": " + e.getMessage());
+        }
     }
 
     private int port() {
