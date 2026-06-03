@@ -26,6 +26,7 @@ import (
 	"github.com/fungiblemoose/tickwarden/internal/iostorm"
 	"github.com/fungiblemoose/tickwarden/internal/loadgen"
 	"github.com/fungiblemoose/tickwarden/internal/observe"
+	"github.com/fungiblemoose/tickwarden/internal/optimize"
 	"github.com/fungiblemoose/tickwarden/internal/ostune"
 	"github.com/fungiblemoose/tickwarden/internal/pregen"
 	"github.com/fungiblemoose/tickwarden/internal/thermal"
@@ -40,6 +41,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "optimize":
+		cmdOptimize(os.Args[2:])
 	case "detect":
 		cmdDetect(os.Args[2:])
 	case "tune":
@@ -79,6 +82,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `tickwarden — hardware-aware, host-aware Minecraft server tuning
 
 Usage:
+  tickwarden optimize [flags]      one-shot: detect + mods + players → the full maxed-but-safe plan
   tickwarden detect [-json]        print the detected host/cgroup profile
   tickwarden tune   [-json]        recommend server settings, with reasons
   tickwarden watch  [flags]        correlate TPS dips with host starvation
@@ -95,6 +99,37 @@ Usage:
 
 Run a command with -h for its flags.
 `)
+}
+
+func cmdOptimize(args []string) {
+	fs := flag.NewFlagSet("optimize", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "emit the full analysis as JSON")
+	modsDir := fs.String("mods-dir", "", "scan this server mods/ dir to detect mods + advise")
+	players := fs.Int("players", 0, "expected PEAK players (0 => default friends-server sizing)")
+	playersURL := fs.String("players-url", "", "companion endpoint for the MEASURED peak (overrides -players)")
+	clustered := fs.Bool("clustered", false, "players congregate (shared base/hub) rather than scatter")
+	doApply := fs.Bool("apply", false, "apply the server.properties recommendations (dry-run unless -write)")
+	write := fs.Bool("write", false, "with -apply, actually write the file (after a .bak backup)")
+	props := fs.String("properties", "server.properties", "path to server.properties")
+	cfg := fs.String("config", "tickwarden.toml", "path to lock config")
+	fs.Parse(args)
+
+	res, err := optimize.Analyze(optimize.Options{
+		ModsDir: *modsDir, Players: *players, PlayersURL: *playersURL, Clustered: *clustered,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "optimize failed:", err)
+		os.Exit(1)
+	}
+	if *doApply {
+		runApply(res.Plan, *props, *cfg, *write)
+		return
+	}
+	if *asJSON {
+		printJSON(res)
+		return
+	}
+	fmt.Print(res.Report())
 }
 
 func cmdDetect(args []string) {

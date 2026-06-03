@@ -36,6 +36,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o tickwarden ./cmd/tickwarden
 **Tuning** (run anywhere, including inside the container):
 
 ```sh
+tickwarden optimize               # one-shot: detect + mods + players → the whole plan, one screen
+tickwarden optimize -apply        # ...and write the server.properties part (dry-run unless -write)
 tickwarden detect                 # hardware + cgroup limits the server runs under
 tickwarden tune                   # recommended settings, each with a reason and confidence
 tickwarden tune -mods-dir mods/   # read installed mods; flag conflicts, suggest missing ones
@@ -131,8 +133,8 @@ real budget and uses the `host` and `iostorm` views so that maxing out your
 server doesn't starve everything else on the box.
 
 The rules are upfront about how solid they are. Some are well established, some
-are educated guesses, and the lighting-engine choice is openly `contested`. Each
-one carries its confidence level and the reasoning behind it, and
+are educated guesses, and the contested ones (like the per-core distance budget)
+say so outright. Each carries its confidence level and the reasoning behind it, and
 `docs/DECISION_TREE.md` records which numbers come from a real measurement and
 which are extrapolated. `bench` and `bench-diff` exist so a contested rule can
 be settled with data instead of an argument.
