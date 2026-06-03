@@ -13,12 +13,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/fungiblemoose/tickwarden/internal/adaptive"
 	"github.com/fungiblemoose/tickwarden/internal/apply"
 	"github.com/fungiblemoose/tickwarden/internal/detect"
 	"github.com/fungiblemoose/tickwarden/internal/hostagent"
@@ -67,6 +69,8 @@ func main() {
 		cmdHotspots(os.Args[2:])
 	case "pregen":
 		cmdPregen(os.Args[2:])
+	case "adaptive":
+		cmdAdaptive(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("tickwarden", version)
 	case "help", "-h", "--help":
@@ -94,6 +98,7 @@ Usage:
   tickwarden thermal [flags]       CPU thermal / frequency-throttle check
   tickwarden hotspots [flags]      top loaded chunks by block-entity count (lag by location)
   tickwarden pregen [flags]        host-load-aware Chunky pregen (pauses when busy/players on)
+  tickwarden adaptive [flags]      scale sim/view distance live with load (dry-run by default)
   tickwarden loadtest [flags]      drive a reproducible Chunky load while benchmarking
   tickwarden version
 
@@ -722,6 +727,85 @@ func cmdPregen(args []string) {
 	if err := ctrl.Run(ctx); err != nil && err != context.Canceled {
 		fmt.Fprintln(os.Stderr, "pregen stopped:", err)
 	}
+}
+
+func cmdAdaptive(args []string) {
+	fs := flag.NewFlagSet("adaptive", flag.ExitOnError)
+	base := fs.String("url", "http://127.0.0.1:9225", "companion base URL (uses /tps and /setdistance)")
+	interval := fs.Duration("interval", 10*time.Second, "decision interval")
+	target := fs.Float64("target-mspt", adaptive.DefaultConfig().TargetMSPT, "keep MSPT at/under this (ms)")
+	minSim := fs.Int("min-sim", adaptive.DefaultConfig().MinSim, "never drop simulation distance below this")
+	maxSim := fs.Int("max-sim", adaptive.DefaultConfig().MaxSim, "never raise simulation distance above this")
+	raiseDebounce := fs.Int("raise-debounce", 3, "consecutive raise decisions required before raising")
+	doApply := fs.Bool("apply", false, "actually apply changes (default is dry-run: log only)")
+	fs.Parse(args)
+
+	cfg := adaptive.DefaultConfig()
+	cfg.TargetMSPT, cfg.MinSim, cfg.MaxSim = *target, *minSim, *maxSim
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	mode := "DRY-RUN (logging only)"
+	if *doApply {
+		mode = "APPLY (changing live distances)"
+	}
+	fmt.Fprintf(os.Stderr, "adaptive: %s — target %.0fms, sim [%d..%d], every %s; ctrl-c to stop\n", mode, *target, *minSim, *maxSim, *interval)
+
+	ticker := time.NewTicker(*interval)
+	defer ticker.Stop()
+	raiseStreak := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			snap, err := observe.FetchSnapshot(*base + "/tps")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "adaptive: read failed:", err)
+				continue
+			}
+			if snap.Sim <= 0 {
+				fmt.Fprintln(os.Stderr, "adaptive: companion not reporting sim/view yet (needs companion >= 0.4.0)")
+				continue
+			}
+			d := adaptive.Decide(adaptive.State{Players: snap.Players, MSPT: snap.MSPT, CurrentSim: snap.Sim, CurrentView: snap.View}, cfg)
+
+			// Debounce raises: only act after the controller asks repeatedly.
+			// Lowering is immediate (protect TPS).
+			if d.Action == adaptive.ActionRaise {
+				raiseStreak++
+				if raiseStreak < *raiseDebounce {
+					fmt.Printf("%s  hold (raise pending %d/%d) — %s\n", time.Now().Format("15:04:05"), raiseStreak, *raiseDebounce, d.Reason)
+					continue
+				}
+			} else {
+				raiseStreak = 0
+			}
+
+			fmt.Printf("%s  [%s] sim %d→%d view %d→%d — %s\n", time.Now().Format("15:04:05"), d.Action, snap.Sim, d.Sim, snap.View, d.View, d.Reason)
+			if d.Action != adaptive.ActionHold && *doApply {
+				if err := applyDistance(*base, d.Sim, d.View); err != nil {
+					fmt.Fprintln(os.Stderr, "adaptive: apply failed:", err)
+				} else {
+					raiseStreak = 0
+				}
+			}
+		}
+	}
+}
+
+func applyDistance(base string, sim, view int) error {
+	url := fmt.Sprintf("%s/setdistance?sim=%d&view=%d", base, sim, view)
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("setdistance returned %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func printJSON(v any) {

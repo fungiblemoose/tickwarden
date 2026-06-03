@@ -1,8 +1,24 @@
 package adaptive
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func cfg() Config { return DefaultConfig() }
+
+// Headroom smaller than a full step must hold (not raise + overshoot), and the
+// reason must say "overshoot", not "ceiling" (the mislabel the live run found).
+func TestDecide_HoldsWhenStepWouldOvershoot(t *testing.T) {
+	// sim 6, MSPT 27 (< 28 band) → idealSim ≈ 6·√(35/27) ≈ 6.8, so +1 (7) overshoots.
+	d := Decide(State{Players: 8, MSPT: 27, CurrentSim: 6, CurrentView: 10}, cfg())
+	if d.Action != ActionHold || d.Sim != 6 {
+		t.Fatalf("a step that overshoots should hold at 6, got %s sim=%d", d.Action, d.Sim)
+	}
+	if !strings.Contains(d.Reason, "overshoot") {
+		t.Fatalf("reason should mention overshoot, not ceiling: %q", d.Reason)
+	}
+}
 
 func TestDecide_OverBudgetLowers(t *testing.T) {
 	// 4 players, MSPT 48 (over the 35 target), sim 14 → must lower, bounded by MaxStepDown.

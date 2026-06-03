@@ -105,6 +105,35 @@ func FetchPlayers(url string) (int, error) {
 	return *payload.Players, nil
 }
 
+// Snapshot is the full companion reading, including the live view/simulation
+// distance the server is currently enforcing — what the adaptive controller
+// needs to decide its next move.
+type Snapshot struct {
+	TPS     float64 `json:"tps"`
+	MSPT    float64 `json:"mspt"`
+	Players int     `json:"players"`
+	View    int     `json:"view"`
+	Sim     int     `json:"sim"`
+}
+
+// FetchSnapshot reads the companion's full state from its /tps endpoint.
+func FetchSnapshot(url string) (Snapshot, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Snapshot{}, fmt.Errorf("endpoint returned %d", resp.StatusCode)
+	}
+	var s Snapshot
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return Snapshot{}, err
+	}
+	return s, nil
+}
+
 // StubReader reports a flat healthy 20 TPS. Useful for exercising the watch
 // loop and PSI correlation without a live server wired up.
 type StubReader struct{}

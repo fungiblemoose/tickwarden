@@ -127,7 +127,12 @@ func Decide(s State, cfg Config) Decision {
 		}
 		newSim = clampInt(newSim, cfg.MinSim, cfg.MaxSim)
 		if newSim <= s.CurrentSim {
-			return hold(fmt.Sprintf("headroom (MSPT %.1f) but already at the sim ceiling (%d)", s.MSPT, cfg.MaxSim))
+			if s.CurrentSim >= cfg.MaxSim {
+				return hold(fmt.Sprintf("headroom (MSPT %.1f) but already at the sim ceiling (%d)", s.MSPT, cfg.MaxSim))
+			}
+			// There's headroom, but not a full step's worth — a +1 would push MSPT
+			// past target. Hold rather than overshoot.
+			return hold(fmt.Sprintf("MSPT %.1f under target but a +1 step would overshoot — holding sim %d", s.MSPT, s.CurrentSim))
 		}
 		return Decision{Sim: newSim, View: view(newSim), Action: ActionRaise,
 			Reason: fmt.Sprintf("MSPT %.1f well under %.1f target (%d players): raise sim %d→%d", s.MSPT, cfg.TargetMSPT, s.Players, s.CurrentSim, newSim)}
