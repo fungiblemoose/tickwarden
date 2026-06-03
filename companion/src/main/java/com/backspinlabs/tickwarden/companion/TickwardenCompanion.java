@@ -75,6 +75,12 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
 
     private HttpServer http;
 
+    // The running server, captured at start so the HTTP handlers can read and
+    // (on the server thread) change view/simulation distance at runtime — the
+    // hook the adaptive controller drives. Volatile: written by the server
+    // thread, read by the HTTP handler thread.
+    private volatile net.minecraft.server.MinecraftServer mcServer;
+
     /** One loaded chunk and the tickable load it carries. Chunk coordinates. */
     private record Hotspot(String dimension, int x, int z, int blockEntities) {
     }
@@ -89,6 +95,7 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
             }
         });
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            mcServer = server;
             loadPeak();
             startHttp();
         });
@@ -174,6 +181,35 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
         }
     }
 
+    /** Parse an int query parameter (e.g. "sim" from "sim=10&view=14"); null if absent/bad. */
+    private static Integer paramInt(String query, String key) {
+        if (query == null) {
+            return null;
+        }
+        for (String pair : query.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq > 0 && pair.substring(0, eq).equals(key)) {
+                try {
+                    return Integer.parseInt(pair.substring(eq + 1).trim());
+                } catch (NumberFormatException e) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Clamp a distance to Minecraft's sane range so a bad request can't wedge the server. */
+    private static int clampDist(int d) {
+        if (d < 2) {
+            return 2;
+        }
+        if (d > 32) {
+            return 32;
+        }
+        return d;
+    }
+
     private int port() {
         String raw = System.getProperty("tickwarden.port");
         if (raw == null) {
@@ -194,10 +230,47 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
         try {
             http = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
             http.createContext("/tps", exchange -> {
+                int view = -1, sim = -1;
+                var srv = mcServer;
+                if (srv != null) {
+                    view = srv.getPlayerList().getViewDistance();
+                    sim = srv.getPlayerList().getSimulationDistance();
+                }
                 String json = String.format(Locale.ROOT,
-                        "{\"tps\":%.2f,\"mspt\":%.2f,\"players\":%d,\"players_peak\":%d}",
-                        tps, mspt, players, playersPeak);
+                        "{\"tps\":%.2f,\"mspt\":%.2f,\"players\":%d,\"players_peak\":%d,\"view\":%d,\"sim\":%d}",
+                        tps, mspt, players, playersPeak, view, sim);
                 byte[] body = json.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, body.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(body);
+                }
+            });
+            // Runtime distance setter — the engine supports changing view/sim
+            // distance live (vanilla just has no command). Must run on the server
+            // thread, so we hand it to srv.execute(). Query: /setdistance?sim=10&view=14
+            http.createContext("/setdistance", exchange -> {
+                String q = exchange.getRequestURI().getRawQuery();
+                Integer sim = paramInt(q, "sim");
+                Integer view = paramInt(q, "view");
+                final var srv = mcServer;
+                String resp;
+                if (srv == null) {
+                    resp = "{\"ok\":false,\"error\":\"server not ready\"}";
+                } else {
+                    srv.execute(() -> {
+                        var pl = srv.getPlayerList();
+                        if (view != null) {
+                            pl.setViewDistance(clampDist(view));
+                        }
+                        if (sim != null) {
+                            pl.setSimulationDistance(clampDist(sim));
+                        }
+                    });
+                    resp = String.format(Locale.ROOT, "{\"ok\":true,\"sim\":%s,\"view\":%s}",
+                            sim == null ? "null" : sim.toString(), view == null ? "null" : view.toString());
+                }
+                byte[] body = resp.getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().set("Content-Type", "application/json");
                 exchange.sendResponseHeaders(200, body.length);
                 try (OutputStream os = exchange.getResponseBody()) {
