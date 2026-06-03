@@ -134,6 +134,18 @@ func TestLightingAlwaysScalableLux(t *testing.T) {
 // Settled (survival, no flying gen spikes) relaxes the flying-worst-case budget,
 // so it should raise sim and never lower it. 3 cores / 3 players: spread flying
 // gives sim 8, settled gives 11.
+// Measured: 3 stacked players share one sim bubble (~1 player's cost), so a
+// clustered trio should size like ~1 effective player. 3 cores / 3 players:
+// spread → sim 8, clustered → sim 14 (effective ~1, sqrt(64*3/1)≈13.9).
+func TestClusteredThreeSharesBubble(t *testing.T) {
+	p := detect.Profile{EffectiveCores: 3, MemoryBudgetBytes: 8 << 30}
+	spread, _ := recVal(t, p, Options{Players: 3, PerfMods: true}, "simulation-distance")
+	clustered, _ := recVal(t, p, Options{Players: 3, PerfMods: true, Clustered: true}, "simulation-distance")
+	if spread != "8" || clustered != "14" {
+		t.Fatalf("3 players: want spread sim=8, clustered sim=14; got %q / %q", spread, clustered)
+	}
+}
+
 func TestSettledRaisesSim(t *testing.T) {
 	p := detect.Profile{EffectiveCores: 3, MemoryBudgetBytes: 8 << 30}
 	flying, _ := recVal(t, p, Options{Players: 3, PerfMods: true}, "simulation-distance")

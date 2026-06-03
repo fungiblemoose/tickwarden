@@ -284,9 +284,13 @@ func distancesFor(cores float64, players int, perfMods, clustered, settled, ssd 
 	}
 	effPlayers := players
 	if clustered {
-		// Half-overlap: a clustered group costs about half its head count in
-		// independent ticking areas. max(1,...) keeps the divisor sane.
-		effPlayers = (players + 1) / 2
+		// A clustered group shares one simulation bubble, so it ticks far fewer
+		// independent areas than its head count. MEASURED: 3 bots stacked cost
+		// ~7.8ms — about ONE spread player (7.1ms), not the half (~2) an earlier
+		// model assumed. So treat a cluster as ~N/3 effective areas (≥1): tight
+		// enough to match the data, loose enough to stay safe for a cluster
+		// that's spread over a base rather than standing on one block.
+		effPlayers = (players + 2) / 3
 		if effPlayers < 1 {
 			effPlayers = 1
 		}
