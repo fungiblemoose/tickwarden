@@ -418,7 +418,7 @@ func cmdHost(args []string) {
 
 func cmdLoadtest(args []string) {
 	fs := flag.NewFlagSet("loadtest", flag.ExitOnError)
-	loadType := fs.String("load", "chunky", "load type: chunky (generation) | entity (mobs) | player (Carpet fake-player sim bubble)")
+	loadType := fs.String("load", "chunky", "load type: chunky (generation) | entity (mobs) | player (Carpet sim bubble) | fly (Carpet bot teleporting through fresh terrain = flight gen load)")
 	rconAddr := fs.String("rcon-addr", "127.0.0.1:25575", "RCON address of the target server")
 	tpsURL := fs.String("tps-url", "http://127.0.0.1:9225/tps", "companion TPS endpoint to sample")
 	world := fs.String("world", "minecraft:overworld", "world to pregen (chunky load)")
@@ -429,13 +429,16 @@ func cmdLoadtest(args []string) {
 	entityY := fs.Int("entity-y", 70, "Y to summon/spawn at — pick a valid surface (entity/player load)")
 	entityCount := fs.Int("entity-count", 200, "how many AI mobs to summon (entity load)")
 	playerCount := fs.Int("player-count", 1, "how many Carpet fake players to spawn (player load)")
+	flyStep := fs.Int("fly-step", 64, "blocks per teleport for fly load (×~1/s ≈ flight speed)")
 	duration := fs.Duration("duration", 30*time.Second, "measurement + load window")
 	interval := fs.Duration("interval", time.Second, "bench sampling interval")
 	label := fs.String("label", "", "label for this run")
 	out := fs.String("out", "", "write the bench stats JSON here (for bench-diff)")
 	fs.Parse(args)
-	if *loadType != "chunky" && *loadType != "entity" && *loadType != "player" {
-		fmt.Fprintln(os.Stderr, "-load must be 'chunky', 'entity', or 'player'")
+	switch *loadType {
+	case "chunky", "entity", "player", "fly":
+	default:
+		fmt.Fprintln(os.Stderr, "-load must be 'chunky', 'entity', 'player', or 'fly'")
 		os.Exit(2)
 	}
 
@@ -459,7 +462,13 @@ func cmdLoadtest(args []string) {
 	loadWindow := *duration + 2*time.Second
 	loadErr := make(chan error, 1)
 	var loadDesc string
-	if *loadType == "player" {
+	if *loadType == "fly" {
+		steps := int(loadWindow / time.Second)
+		loadDesc = fmt.Sprintf("fake player teleporting %d blocks/step from (%d,%d,%d) through fresh terrain [flight gen load]", *flyStep, *cx, *entityY, *cz)
+		go func() {
+			loadErr <- loadgen.FlyLoad(client, *cx, *entityY, *cz, *flyStep, steps, time.Second)
+		}()
+	} else if *loadType == "player" {
 		loadDesc = fmt.Sprintf("%d Carpet fake player(s) at (%d,%d,%d) [real sim-distance bubble]", *playerCount, *cx, *entityY, *cz)
 		go func() {
 			loadErr <- loadgen.PlayerLoad(client, *cx, *entityY, *cz, *playerCount, loadWindow)

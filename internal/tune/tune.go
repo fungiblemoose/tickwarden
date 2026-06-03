@@ -144,7 +144,7 @@ func Recommend(p detect.Profile, opts Options) Plan {
 		"maxed for render range — view distance costs bandwidth + RAM, not tick CPU (cheap disk loads over pregenerated chunks on SSD); pushed well above sim", Heuristic, TargetProperties)
 	simConf := Solid
 	if opts.Settled {
-		simConf = Contested // the ~2x settled budget is reasoned from gen-spike data, not yet cleanly A/B'd
+		simConf = Heuristic // the ~2x settled budget is now measured (fly vs settled A/B), not just reasoned
 	}
 	add("simulation-distance", fmt.Sprintf("%d", sim),
 		fmt.Sprintf("sized for %s%d peak players on %.1f cores%s%s%s: per-tick cost scales with players × sim², so safe sim ∝ sqrt(budget/players); validate with `bench`",
@@ -276,9 +276,10 @@ func distancesFor(cores float64, players int, perfMods, clustered, settled, ssd 
 	if settled {
 		// The default budget is the flying worst case (gen-spike limited). Settled
 		// survival play in pregenerated terrain avoids those spikes, so the
-		// simulation budget roughly doubles. CONTESTED: reasoned from the gen-spike
-		// data, not yet cleanly A/B'd (Carpet bots walk too slowly to reproduce
-		// flying gen load for a direct measurement).
+		// simulation budget roughly doubles. MEASURED via a fly-vs-settled A/B: at
+		// the same sim distance, flying cost ~2.5x the mean tick time (and spiked
+		// to the 50ms budget edge) where settled stayed flat. 2.0x is the
+		// conservative choice — flying's spikes, not its mean, are the real limit.
 		budgetPerCore *= 2.0
 	}
 	effPlayers := players

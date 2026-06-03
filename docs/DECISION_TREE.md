@@ -108,11 +108,13 @@ variable.
 > **Play style (`-settled`):** the default budget is the FLYING worst case —
 > limited by chunk-*generation* spikes when players cross chunks fast, not by
 > simulation cost. Survival play in pregenerated terrain (walking, not flying)
-> avoids those spikes (the A/B's stationary bot held sim-10 at a flat 6 ms,
-> sim-14 at 9 ms, no spikes), so `-settled` roughly doubles the budget. Marked
-> `contested`: the 2× is reasoned from the gen-spike data, not cleanly A/B'd
-> (Carpet bots walk too slowly to reproduce flying gen load directly). Only set
-> it if players stay in pregenerated/known terrain at survival speeds.
+> avoids those spikes, so `-settled` roughly doubles the budget. **Measured** via
+> a fly-vs-settled A/B (a Carpet bot teleported through fresh terrain reproduces
+> flight gen load): at the same sim-12, flying cost ~2.5× the mean tick time
+> (18 ms, spiking to 48 ms) where settled stayed flat at 7 ms. 2.0× is the
+> conservative choice — flying's *spikes*, not its mean, are the real limit. Only
+> set it if players stay in pregenerated/known terrain at survival speeds; an
+> elytra puts you back in the flying case.
 
 **Still folklore:** `budgetPerCore` and the perf-mod multiplier are anchored to
 ONE validated data point (see the calibration log) and otherwise extrapolated.
@@ -221,6 +223,7 @@ Validated data points so far:
 | 2026-05-31 | heap sized to load, not all-RAM | 8 GiB / 2 players: real heap usage ~1.1 GiB of a 4 GiB heap → recommend 3 GiB, leaving page cache | spark heap gauge |
 
 | 2026-06-03 | **sim-distance cost validates the `players × sim²` model** | one Carpet fake-player fixed at spawn, sim 6/10/14 → mean tick 4.74 / 6.07 / 8.80 ms (CPU pressure flat ~7%, so trustworthy). The three points track base + k·sim² (predicts sim-10 ≈ 6.4 ms vs 6.07 measured). sim-6→14 (~5.4× area) = +86% tick. All held 20 TPS — a single player has headroom well past sim-10; the sim-10 ceiling was for the heavier 2-flying-players case | `loadtest -load player` + `bench-diff` on the reference box |
+| 2026-06-03 | **`-settled` ~2× budget is measured** (flying vs settled) | a Carpet bot teleported through fresh terrain (`loadtest -load fly`) vs a stationary bot, both at sim-12: flying = 18 ms mean / 48 ms spike, settled = 7.3 ms flat → flying ~2.5× the mean, with spikes at the 50 ms edge. Confirms settled has ≳2× the headroom; the rule uses a conservative 2× | `loadtest -load fly` vs `-load player` on the reference box |
 | 2026-06-03 | generation is *not* a tick bottleneck on this box | a 40-chunk-radius Chunky burst on fresh terrain held 20 TPS, 0.22 ms mean tick, CPU pressure ~10% — C2ME runs gen off-thread and 3 cores absorb it (confirms the storage/C2ME work fixed the old 145–288 ms gen spikes) | `tickwarden loadtest` on the reference box |
 
 > **Why the sim-distance ceiling still isn't freshly A/B'd:** `loadtest` drives
