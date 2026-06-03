@@ -21,13 +21,15 @@ repositories {
     maven { url = 'https://maven.fabricmc.net/' }
 }
 
-// Versions pinned to match the target server (Minecraft 1.21.5).
-// fabric-api version copied verbatim from the server's mods/ directory.
+// Version coordinates live in gradle.properties and default to the target
+// server (Minecraft 1.21.5). Override per build, e.g.:
+//   ./gradlew build -Pminecraft_version=1.21.4 -Pfabric_api_version=0.119.0+1.21.4
+// See docs/MULTIVERSION.md for picking the right fabric-api build.
 dependencies {
-    minecraft 'com.mojang:minecraft:1.21.5'
+    minecraft "com.mojang:minecraft:${minecraft_version}"
     mappings loom.officialMojangMappings()
-    modImplementation 'net.fabricmc:fabric-loader:0.16.14'
-    modImplementation 'net.fabricmc.fabric-api:fabric-api:0.128.2+1.21.5'
+    modImplementation "net.fabricmc:fabric-loader:${loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
 }
 
 java {
@@ -42,7 +44,8 @@ tasks.withType(JavaCompile).configureEach {
 
 processResources {
     inputs.property 'version', project.version
+    inputs.property 'minecraft_version', minecraft_version
     filesMatching('fabric.mod.json') {
-        expand version: project.version
+        expand version: project.version, minecraft_version: minecraft_version
     }
 }
