@@ -416,7 +416,7 @@ func cmdHost(args []string) {
 
 func cmdLoadtest(args []string) {
 	fs := flag.NewFlagSet("loadtest", flag.ExitOnError)
-	loadType := fs.String("load", "chunky", "load type: chunky (generation) | entity (simulation/tick)")
+	loadType := fs.String("load", "chunky", "load type: chunky (generation) | entity (mobs) | player (Carpet fake-player sim bubble)")
 	rconAddr := fs.String("rcon-addr", "127.0.0.1:25575", "RCON address of the target server")
 	tpsURL := fs.String("tps-url", "http://127.0.0.1:9225/tps", "companion TPS endpoint to sample")
 	world := fs.String("world", "minecraft:overworld", "world to pregen (chunky load)")
@@ -424,15 +424,16 @@ func cmdLoadtest(args []string) {
 	cz := fs.Int("center-z", 100000, "center Z")
 	radius := fs.Int("radius-chunks", 16, "Chunky pregen radius in chunks (chunky load)")
 	entityType := fs.String("entity-type", "minecraft:villager", "mob to summon (entity load) — pick one with AI")
-	entityY := fs.Int("entity-y", 70, "Y to summon at — pick a valid surface (entity load)")
+	entityY := fs.Int("entity-y", 70, "Y to summon/spawn at — pick a valid surface (entity/player load)")
 	entityCount := fs.Int("entity-count", 200, "how many AI mobs to summon (entity load)")
+	playerCount := fs.Int("player-count", 1, "how many Carpet fake players to spawn (player load)")
 	duration := fs.Duration("duration", 30*time.Second, "measurement + load window")
 	interval := fs.Duration("interval", time.Second, "bench sampling interval")
 	label := fs.String("label", "", "label for this run")
 	out := fs.String("out", "", "write the bench stats JSON here (for bench-diff)")
 	fs.Parse(args)
-	if *loadType != "chunky" && *loadType != "entity" {
-		fmt.Fprintln(os.Stderr, "-load must be 'chunky' or 'entity'")
+	if *loadType != "chunky" && *loadType != "entity" && *loadType != "player" {
+		fmt.Fprintln(os.Stderr, "-load must be 'chunky', 'entity', or 'player'")
 		os.Exit(2)
 	}
 
@@ -456,7 +457,12 @@ func cmdLoadtest(args []string) {
 	loadWindow := *duration + 2*time.Second
 	loadErr := make(chan error, 1)
 	var loadDesc string
-	if *loadType == "entity" {
+	if *loadType == "player" {
+		loadDesc = fmt.Sprintf("%d Carpet fake player(s) at (%d,%d,%d) [real sim-distance bubble]", *playerCount, *cx, *entityY, *cz)
+		go func() {
+			loadErr <- loadgen.PlayerLoad(client, *cx, *entityY, *cz, *playerCount, loadWindow)
+		}()
+	} else if *loadType == "entity" {
 		loadDesc = fmt.Sprintf("%d %s at (%d,%d,%d) [simulation load]", *entityCount, *entityType, *cx, *entityY, *cz)
 		go func() {
 			loadErr <- loadgen.EntityLoad(client, *entityType, *cx, *entityY, *cz, *entityCount, loadWindow)

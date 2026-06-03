@@ -211,6 +211,7 @@ Validated data points so far:
 | 2026-05-31 | C2ME kept (not disabled) below 4 cores; 3 cores → 2 workers | same box: max tick 145–288ms → 61–67ms with C2ME at 2 workers; disabling it was the wrong call | spark before/after |
 | 2026-05-31 | heap sized to load, not all-RAM | 8 GiB / 2 players: real heap usage ~1.1 GiB of a 4 GiB heap → recommend 3 GiB, leaving page cache | spark heap gauge |
 
+| 2026-06-03 | **sim-distance cost validates the `players × sim²` model** | one Carpet fake-player fixed at spawn, sim 6/10/14 → mean tick 4.74 / 6.07 / 8.80 ms (CPU pressure flat ~7%, so trustworthy). The three points track base + k·sim² (predicts sim-10 ≈ 6.4 ms vs 6.07 measured). sim-6→14 (~5.4× area) = +86% tick. All held 20 TPS — a single player has headroom well past sim-10; the sim-10 ceiling was for the heavier 2-flying-players case | `loadtest -load player` + `bench-diff` on the reference box |
 | 2026-06-03 | generation is *not* a tick bottleneck on this box | a 40-chunk-radius Chunky burst on fresh terrain held 20 TPS, 0.22 ms mean tick, CPU pressure ~10% — C2ME runs gen off-thread and 3 cores absorb it (confirms the storage/C2ME work fixed the old 145–288 ms gen spikes) | `tickwarden loadtest` on the reference box |
 
 > **Why the sim-distance ceiling still isn't freshly A/B'd:** `loadtest` drives
@@ -218,16 +219,14 @@ Validated data points so far:
 > costs come from *ticking entities* in the loaded area, so settling sim-10 vs.
 > sim-12 needs an entity/player load that Chunky can't fake.
 >
-> The `loadtest -load entity` mode (force-load + summon AI mobs) was the first
-> attempt. It confirmed the important thing — **simulation cost is main-thread
-> bound: it shows up as MSPT, not CPU pressure** (500 crowded villagers ≈ 28 ms
-> mean tick, ~46 ms peak, with CPU pressure under 2%). But summoned mobs proved a
-> poor *dial*: villager AI cost is collision-dominated (crowded = expensive but
-> self-limiting; spread = nearly free), placement is Y-sensitive, and force-loading
-> near spawn accumulates natural mobs (now suppressed during a run). A clean
-> sim-distance A/B needs a real player-sized sim bubble — **Carpet fake-players** —
-> which is the proper next tool. Until then the sim ceiling stays anchored to the
-> original spark-during-flight measurement.
+> The `loadtest -load entity` mode (force-load + summon AI mobs) confirmed
+> **simulation cost is main-thread bound: it shows up as MSPT, not CPU pressure**
+> (500 crowded villagers ≈ 28 ms mean tick at <2% CPU pressure). But summoned mobs
+> are a poor *dial* (collision-dominated AI, Y-sensitive placement), so the real
+> A/B uses `loadtest -load player` — **Carpet fake-players**, which create a true
+> simulation-distance bubble. That A/B is now done (see the table below): it both
+> measured the sim-distance cost AND validated the `players × sim²` model the
+> distance rule is built on.
 
 **Open calibrations needing data** (run `bench-diff` to settle):
 - Lighting parallel-vs-single-thread benefit by core count (rule 5) — no longer
