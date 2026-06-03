@@ -149,7 +149,24 @@ be settled with data instead of an argument.
 | 1.5 | Benchmark + diff with host-load confound detection (`bench`, `bench-diff`) | done; a built-in load driver beyond `loadtest` is still open |
 | 2 | Host agent: name the noisy neighbour, read host-applied limits (`host`, `iostorm`) | done |
 | below-Java | OS/kernel (`ostune`), thermal, mod intelligence, lag-by-location (`hotspots`), host-aware pregen | done |
-| 3 | Adaptive tuning: scale distances live with players/headroom | not started (risky; needs headroom to give back) |
+| 3 | Adaptive tuning: scale sim/view distance live with load (`adaptive`) | done — companion changes distance at runtime (no restart); controller sheds fast / raises slow, holds a floor, and pre-sizes for the expected peak so a join never triggers a cut. Opt-in: dry-run by default, `-apply` to act |
+
+### Adaptive (`tickwarden adaptive`)
+
+Scales simulation/view distance to the live load instead of fixing one value for
+the worst case. It reads the companion's TPS/MSPT, decides with the measured
+`players × sim²` model, and (with `-apply`) changes distance at runtime — no
+restart, no player kick. Safety: hard render floors, fast-down/slow-up ramps, a
+deadband, and **on-join pre-sizing** — it sizes for your expected peak
+(`players_peak`), so a join finds a peak-safe distance already set rather than
+forcing a drop. Dry-run by default:
+
+```sh
+tickwarden adaptive                 # log decisions only (safe to watch)
+tickwarden adaptive -apply          # actually scale distance live
+```
+
+Needs the companion mod (≥0.4.0) for the `/setdistance` runtime hook.
 
 ## License
 
