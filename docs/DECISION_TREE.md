@@ -211,6 +211,15 @@ Validated data points so far:
 | 2026-05-31 | C2ME kept (not disabled) below 4 cores; 3 cores → 2 workers | same box: max tick 145–288ms → 61–67ms with C2ME at 2 workers; disabling it was the wrong call | spark before/after |
 | 2026-05-31 | heap sized to load, not all-RAM | 8 GiB / 2 players: real heap usage ~1.1 GiB of a 4 GiB heap → recommend 3 GiB, leaving page cache | spark heap gauge |
 
+| 2026-06-03 | generation is *not* a tick bottleneck on this box | a 40-chunk-radius Chunky burst on fresh terrain held 20 TPS, 0.22 ms mean tick, CPU pressure ~10% — C2ME runs gen off-thread and 3 cores absorb it (confirms the storage/C2ME work fixed the old 145–288 ms gen spikes) | `tickwarden loadtest` on the reference box |
+
+> **Why the sim-distance ceiling still isn't freshly A/B'd:** `loadtest` drives
+> chunk *generation*, which this box no longer chokes on. Simulation distance
+> costs come from *ticking entities* in the loaded area, so settling sim-10 vs.
+> sim-12 needs an entity/player load (mob farms, or fake-player bots) that Chunky
+> can't fake. The sim ceiling stays anchored to the original spark-during-flight
+> measurement until such a load exists.
+
 **Open calibrations needing data** (run `bench-diff` to settle):
 - Lighting parallel-vs-single-thread benefit by core count (rule 5) — no longer
   changes the recommendation (always ScalableLux, the maintained fork), but the

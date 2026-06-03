@@ -3,9 +3,9 @@
 // tickwarden is that the *why* is legible, not just the value. The rules here
 // are the encoded decision tree documented in docs/DECISION_TREE.md.
 //
-// These heuristics are opinionated and some are contested (lighting engine
-// choice especially). Where a rule is folklore rather than measured, the
-// Reason says so. Validate with a repeatable load before trusting them.
+// These heuristics are opinionated and some are contested (the per-core
+// distance budget especially). Where a rule is folklore rather than measured,
+// the Reason says so. Validate with a repeatable load before trusting them.
 package tune
 
 import (
