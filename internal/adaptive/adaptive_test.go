@@ -65,6 +65,23 @@ func TestDecide_RespectsFloorWhenOver(t *testing.T) {
 	}
 }
 
+// On-join pre-sizing: with one player and low MSPT but an expected peak of 4,
+// the controller must NOT raise to a distance that 4 players would break — it
+// sizes for the peak so a join doesn't trigger a cut.
+func TestDecide_PreSizesForPeak(t *testing.T) {
+	sized := Decide(State{Players: 1, PlayersPeak: 4, MSPT: 7, CurrentSim: 12, CurrentView: 16}, cfg())
+	naive := Decide(State{Players: 1, PlayersPeak: 0, MSPT: 7, CurrentSim: 12, CurrentView: 16}, cfg())
+	if naive.Action != ActionRaise {
+		t.Fatalf("without peak awareness, low 1-player MSPT should raise; got %s", naive.Action)
+	}
+	if sized.Sim > naive.Sim {
+		t.Fatalf("peak-aware sizing must never raise higher than naive: sized=%d naive=%d", sized.Sim, naive.Sim)
+	}
+	if sized.Action != ActionHold || sized.Sim != 12 {
+		t.Fatalf("peak-4 projection (7×4=28, band edge) should hold at the peak-safe 12, got %s sim=%d", sized.Action, sized.Sim)
+	}
+}
+
 func TestDecide_NoPlayersHolds(t *testing.T) {
 	d := Decide(State{Players: 0, MSPT: 5, CurrentSim: 12}, cfg())
 	if d.Action != ActionHold {

@@ -109,11 +109,12 @@ func FetchPlayers(url string) (int, error) {
 // distance the server is currently enforcing — what the adaptive controller
 // needs to decide its next move.
 type Snapshot struct {
-	TPS     float64 `json:"tps"`
-	MSPT    float64 `json:"mspt"`
-	Players int     `json:"players"`
-	View    int     `json:"view"`
-	Sim     int     `json:"sim"`
+	TPS         float64 `json:"tps"`
+	MSPT        float64 `json:"mspt"`
+	Players     int     `json:"players"`
+	PlayersPeak int     `json:"players_peak"`
+	View        int     `json:"view"`
+	Sim         int     `json:"sim"`
 }
 
 // FetchSnapshot reads the companion's full state from its /tps endpoint.

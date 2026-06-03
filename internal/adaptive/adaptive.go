@@ -30,6 +30,7 @@ import (
 // State is a snapshot the controller reasons over (from the companion).
 type State struct {
 	Players     int     // current online players
+	PlayersPeak int     // expected peak (persisted) — size for this, not just current
 	MSPT        float64 // current mean tick time, ms
 	CurrentSim  int     // simulation-distance in effect
 	CurrentView int     // view-distance in effect
@@ -102,10 +103,27 @@ func Decide(s State, cfg Config) Decision {
 		return hold("no MSPT reading — holding")
 	}
 
-	idealSim := float64(s.CurrentSim) * math.Sqrt(cfg.TargetMSPT/s.MSPT)
+	// ON-JOIN PRE-SIZING. Size for the expected PEAK, not just who's on right now.
+	// Player cost is linear (measured), so the MSPT the peak would produce at the
+	// current distance is ~ currentMSPT × peak/current. We tune against THAT, so
+	// the distance is already peak-safe and a join doesn't trigger a cut — the
+	// render-drop-on-join the operator was wary of. (Quiet times hold at the
+	// peak-safe value rather than over-raising for a lone player.) The ratio
+	// scaling slightly over-counts the fixed base cost, which only makes it more
+	// conservative — safe. With no recorded peak it falls back to current load.
+	peak := s.PlayersPeak
+	if peak < s.Players {
+		peak = s.Players
+	}
+	if peak < 1 {
+		peak = 1
+	}
+	projectedMSPT := s.MSPT * (float64(peak) / float64(s.Players))
+
+	idealSim := float64(s.CurrentSim) * math.Sqrt(cfg.TargetMSPT/projectedMSPT)
 
 	switch {
-	case s.MSPT > cfg.TargetMSPT:
+	case projectedMSPT > cfg.TargetMSPT:
 		// Over budget — shed load fast (down to MaxStepDown), but never below floor.
 		newSim := int(math.Floor(idealSim))
 		if newSim < s.CurrentSim-cfg.MaxStepDown {
@@ -116,9 +134,9 @@ func Decide(s State, cfg Config) Decision {
 			return hold(fmt.Sprintf("MSPT %.1f over target %.1f but already at the sim floor (%d)", s.MSPT, cfg.TargetMSPT, cfg.MinSim))
 		}
 		return Decision{Sim: newSim, View: view(newSim), Action: ActionLower,
-			Reason: fmt.Sprintf("MSPT %.1f > %.1f target (%d players): lower sim %d→%d", s.MSPT, cfg.TargetMSPT, s.Players, s.CurrentSim, newSim)}
+			Reason: fmt.Sprintf("MSPT %.1f (→%.1f projected for peak %d) > %.1f target: lower sim %d→%d", s.MSPT, projectedMSPT, peak, cfg.TargetMSPT, s.CurrentSim, newSim)}
 
-	case s.MSPT < cfg.TargetMSPT*(1-cfg.Deadband):
+	case projectedMSPT < cfg.TargetMSPT*(1-cfg.Deadband):
 		// Comfortably under — spend a little headroom, one cautious step, and
 		// never past the distance that would reach target.
 		newSim := s.CurrentSim + cfg.MaxStepUp
@@ -135,7 +153,7 @@ func Decide(s State, cfg Config) Decision {
 			return hold(fmt.Sprintf("MSPT %.1f under target but a +1 step would overshoot — holding sim %d", s.MSPT, s.CurrentSim))
 		}
 		return Decision{Sim: newSim, View: view(newSim), Action: ActionRaise,
-			Reason: fmt.Sprintf("MSPT %.1f well under %.1f target (%d players): raise sim %d→%d", s.MSPT, cfg.TargetMSPT, s.Players, s.CurrentSim, newSim)}
+			Reason: fmt.Sprintf("MSPT %.1f (→%.1f projected for peak %d) under %.1f target: raise sim %d→%d", s.MSPT, projectedMSPT, peak, cfg.TargetMSPT, s.CurrentSim, newSim)}
 
 	default:
 		return hold(fmt.Sprintf("MSPT %.1f within target band — holding sim %d", s.MSPT, s.CurrentSim))

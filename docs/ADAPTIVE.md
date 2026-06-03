@@ -8,8 +8,10 @@ one static value for the worst case. Branch: `adaptive`.
 `tickwarden adaptive` loop are all built. Apply-mode run against an 8-bot ramp:
 it shed sim 12→9→6 as MSPT spiked to 64ms, **held at the sim-6 floor without
 cratering** even while briefly over target, kept TPS at 20, then raised back
-6→7→8 (debounced) once the bots left. Remaining before merge: on-join pre-sizing
-and the stability tweaks noted below.
+6→7→8 (debounced) once the bots left. On-join pre-sizing is now in too: the
+controller projects current per-player cost to the expected peak (`players_peak`)
+and sizes for *that*, so a join doesn't trigger a cut and quiet times hold at the
+peak-safe value instead of over-raising for a lone player.
 
 ## Why it's safe to attempt now
 

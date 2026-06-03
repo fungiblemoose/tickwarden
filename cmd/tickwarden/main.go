@@ -768,7 +768,7 @@ func cmdAdaptive(args []string) {
 				fmt.Fprintln(os.Stderr, "adaptive: companion not reporting sim/view yet (needs companion >= 0.4.0)")
 				continue
 			}
-			d := adaptive.Decide(adaptive.State{Players: snap.Players, MSPT: snap.MSPT, CurrentSim: snap.Sim, CurrentView: snap.View}, cfg)
+			d := adaptive.Decide(adaptive.State{Players: snap.Players, PlayersPeak: snap.PlayersPeak, MSPT: snap.MSPT, CurrentSim: snap.Sim, CurrentView: snap.View}, cfg)
 
 			// Debounce raises: only act after the controller asks repeatedly.
 			// Lowering is immediate (protect TPS).
