@@ -75,6 +75,194 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
 
     private HttpServer http;
 
+    /**
+     * The marketable face of the companion: a single self-contained status page.
+     * No external CDNs, fonts, or scripts — everything (markup, CSS, JS) lives in
+     * this one string so it works on an air-gapped server box. It polls the
+     * existing {@code /tps} and {@code /hotspots} JSON from the browser every ~2 s,
+     * so rendering it costs the game server nothing per tick. Fetches are relative
+     * so the page is port-independent.
+     */
+    private static final String STATUS_PAGE_HTML = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>tickwarden</title>
+            <style>
+              :root {
+                --bg: #0b0e11;
+                --panel: #14181d;
+                --panel2: #1b2026;
+                --line: #232a31;
+                --text: #e6edf3;
+                --muted: #8b97a3;
+                --green: #3fb950;
+                --amber: #d9a441;
+                --red: #f0566a;
+                --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+              }
+              * { box-sizing: border-box; }
+              html, body { margin: 0; height: 100%; }
+              body {
+                background: radial-gradient(1200px 600px at 70% -10%, #11161c 0%, var(--bg) 60%);
+                color: var(--text);
+                font-family: var(--mono);
+                -webkit-font-smoothing: antialiased;
+                padding: 28px 18px 48px;
+              }
+              .wrap { max-width: 860px; margin: 0 auto; }
+              header {
+                display: flex; align-items: baseline; gap: 12px;
+                border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 22px;
+              }
+              .brand { font-size: 20px; font-weight: 700; letter-spacing: 0.04em; }
+              .brand .dot { color: var(--green); }
+              .sub { color: var(--muted); font-size: 12px; }
+              .live { margin-left: auto; color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 7px; }
+              .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 0 rgba(63,185,80,0.6); animation: pulse 2s infinite; }
+              .pulse.stale { background: var(--red); animation: none; }
+              @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(63,185,80,0.5);} 70% { box-shadow: 0 0 0 7px rgba(63,185,80,0);} 100% { box-shadow: 0 0 0 0 rgba(63,185,80,0);} }
+              .grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
+              @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+              .card {
+                background: linear-gradient(180deg, var(--panel) 0%, var(--panel2) 100%);
+                border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+              }
+              .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 6px; }
+              .tps-card { display: flex; flex-direction: column; justify-content: center; }
+              .tps { font-size: 76px; font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
+              .tps.green { color: var(--green); } .tps.amber { color: var(--amber); } .tps.red { color: var(--red); }
+              .tps-unit { font-size: 22px; color: var(--muted); font-weight: 600; margin-left: 6px; }
+              .mspt-row { margin-top: 18px; }
+              .mspt-val { font-size: 15px; }
+              .bar { height: 10px; background: #0a0d10; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-top: 8px; position: relative; }
+              .bar-fill { height: 100%; width: 0%; background: var(--green); transition: width .4s ease, background .4s ease; }
+              .bar-budget { position: absolute; top: -3px; bottom: -3px; left: 100%; width: 2px; background: var(--muted); opacity: .4; }
+              .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; }
+              .stat .v { font-size: 26px; font-weight: 700; }
+              .stat .v small { font-size: 14px; color: var(--muted); font-weight: 500; }
+              table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 4px; }
+              th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+              td { padding: 7px 8px; border-bottom: 1px solid #1a2026; }
+              td.num { text-align: right; }
+              .be { color: var(--amber); font-weight: 700; }
+              tr:last-child td { border-bottom: 0; }
+              .empty { color: var(--muted); padding: 14px 8px; font-size: 13px; }
+              .full { grid-column: 1 / -1; }
+              footer { color: var(--muted); font-size: 11px; margin-top: 22px; text-align: center; }
+            </style>
+            </head>
+            <body>
+            <div class="wrap">
+              <header>
+                <div class="brand">tick<span class="dot">warden</span></div>
+                <div class="sub">server tick health</div>
+                <div class="live"><span class="pulse" id="pulse"></span><span id="livetext">live</span></div>
+              </header>
+
+              <div class="grid">
+                <div class="card tps-card">
+                  <div class="label">ticks per second</div>
+                  <div><span class="tps green" id="tps">--</span><span class="tps-unit">TPS</span></div>
+                  <div class="mspt-row">
+                    <div class="label">ms / tick &mdash; 50ms budget</div>
+                    <div class="mspt-val"><span id="mspt">--</span> ms</div>
+                    <div class="bar"><div class="bar-fill" id="msptbar"></div><div class="bar-budget"></div></div>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="label">load</div>
+                  <div class="stats">
+                    <div class="stat"><div class="label">players</div><div class="v"><span id="players">--</span><small> / <span id="peak">--</span> peak</small></div></div>
+                    <div class="stat"><div class="label">view dist</div><div class="v"><span id="view">--</span></div></div>
+                    <div class="stat"><div class="label">sim dist</div><div class="v"><span id="sim">--</span></div></div>
+                    <div class="stat"><div class="label">status</div><div class="v"><span id="health" style="font-size:18px">--</span></div></div>
+                  </div>
+                </div>
+
+                <div class="card full">
+                  <div class="label">hotspots &mdash; top loaded chunks by block entities</div>
+                  <table>
+                    <thead><tr><th>dimension</th><th>chunk x</th><th>chunk z</th><th class="num">block entities</th></tr></thead>
+                    <tbody id="hotspots"><tr><td class="empty" colspan="4">waiting for first sample&hellip;</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <footer>tickwarden companion &middot; polling 127.0.0.1 every 2s &middot; localhost only</footer>
+            </div>
+
+            <script>
+              const POLL_MS = 2000;
+              const fmt = (n, d) => (n === null || n === undefined || Number.isNaN(n)) ? '--' : Number(n).toFixed(d);
+              const dist = (v) => (v === undefined || v === null || v < 0) ? '--' : v;
+
+              function setLive(ok) {
+                const p = document.getElementById('pulse');
+                const t = document.getElementById('livetext');
+                if (ok) { p.classList.remove('stale'); t.textContent = 'live'; }
+                else { p.classList.add('stale'); t.textContent = 'no signal'; }
+              }
+
+              async function poll() {
+                try {
+                  const [tpsRes, hotRes] = await Promise.all([fetch('/tps'), fetch('/hotspots')]);
+                  const d = await tpsRes.json();
+                  const hot = await hotRes.json();
+
+                  const tpsEl = document.getElementById('tps');
+                  const tps = d.tps;
+                  tpsEl.textContent = fmt(tps, 1);
+                  tpsEl.classList.remove('green', 'amber', 'red');
+                  let cls = 'green', health = 'healthy';
+                  if (tps < 15) { cls = 'red'; health = 'struggling'; }
+                  else if (tps < 19.5) { cls = 'amber'; health = 'strained'; }
+                  tpsEl.classList.add(cls);
+
+                  const healthEl = document.getElementById('health');
+                  healthEl.textContent = health;
+                  healthEl.style.color = cls === 'green' ? 'var(--green)' : cls === 'amber' ? 'var(--amber)' : 'var(--red)';
+
+                  document.getElementById('mspt').textContent = fmt(d.mspt, 1);
+                  const pct = Math.min(100, Math.max(0, (d.mspt / 50) * 100));
+                  const bar = document.getElementById('msptbar');
+                  bar.style.width = pct + '%';
+                  bar.style.background = pct < 70 ? 'var(--green)' : pct < 100 ? 'var(--amber)' : 'var(--red)';
+
+                  document.getElementById('players').textContent = (d.players ?? '--');
+                  document.getElementById('peak').textContent = (d.players_peak ?? '--');
+                  document.getElementById('view').textContent = dist(d.view);
+                  document.getElementById('sim').textContent = dist(d.sim);
+
+                  const tbody = document.getElementById('hotspots');
+                  if (Array.isArray(hot) && hot.length) {
+                    tbody.innerHTML = '';
+                    for (const h of hot) {
+                      const tr = document.createElement('tr');
+                      const dimName = String(h.dimension).replace('minecraft:', '');
+                      tr.innerHTML = '<td>' + dimName + '</td><td>' + h.x + '</td><td>' + h.z +
+                                     '</td><td class="num be">' + h.block_entities + '</td>';
+                      tbody.appendChild(tr);
+                    }
+                  } else {
+                    tbody.innerHTML = '<tr><td class="empty" colspan="4">no notable hotspots</td></tr>';
+                  }
+                  setLive(true);
+                } catch (e) {
+                  setLive(false);
+                }
+              }
+
+              poll();
+              setInterval(poll, POLL_MS);
+            </script>
+            </body>
+            </html>
+            """;
+
     // The running server, captured at start so the HTTP handlers can read and
     // (on the server thread) change view/simulation distance at runtime — the
     // hook the adaptive controller drives. Volatile: written by the server
@@ -229,6 +417,23 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
         int port = port();
         try {
             http = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+            // Root: a self-contained status page (no external deps). It polls the
+            // JSON endpoints below from the browser, so it adds zero per-tick
+            // server work. "/" is a catch-all prefix; serve the page only for the
+            // exact root and 404 anything else so /favicon.ico etc. stay clean.
+            http.createContext("/", exchange -> {
+                if (!exchange.getRequestURI().getPath().equals("/")) {
+                    exchange.sendResponseHeaders(404, -1);
+                    exchange.close();
+                    return;
+                }
+                byte[] body = STATUS_PAGE_HTML.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+                exchange.sendResponseHeaders(200, body.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(body);
+                }
+            });
             http.createContext("/tps", exchange -> {
                 int view = -1, sim = -1;
                 var srv = mcServer;
@@ -287,6 +492,7 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
             });
             http.setExecutor(null);
             http.start();
+            System.out.println("[tickwarden-companion] status page up on http://127.0.0.1:" + port + "/");
             System.out.println("[tickwarden-companion] TPS endpoint up on http://127.0.0.1:" + port + "/tps");
             System.out.println("[tickwarden-companion] hotspots endpoint up on http://127.0.0.1:" + port + "/hotspots");
         } catch (IOException e) {
