@@ -9,15 +9,41 @@ and kernel settings, and overheating. A profiler like spark tells you what's
 slow inside the game; tickwarden covers the layers below that.
 
 It's a single Go binary with nothing to install alongside it, plus an optional
-Fabric mod that reports live TPS. You can run it in two places:
+Fabric mod that reports live TPS and serves a small web dashboard. You can run it
+in two places:
 
-- **Inside the server's container**, to tune the server and to line up TPS drops
-  with the container's own resource pressure.
+- **Inside the server's container**, to tune the server, line up TPS drops with
+  the container's own resource pressure, and (optionally) auto-scale distance.
 - **On the Proxmox or Docker host**, to find which container is starving the
-  others.
+  others — and throttle it.
+
+What sets it apart: its tuning model isn't folklore. Every constant
+(`players × sim²`, the flying-vs-survival budget, the clustered factor, the
+capacity cliff) was *measured* on real hardware — see `docs/DECISION_TREE.md`.
 
 Prebuilt binaries (Linux amd64/arm64, macOS arm64) and the companion jar are on
 the [releases page](https://github.com/fungiblemoose/tickwarden/releases).
+
+## Quickstart
+
+```sh
+# 1. tune to your hardware (reads cores, RAM, cgroup limits, installed mods)
+tickwarden optimize -mods-dir /path/to/mods
+
+# 2. drop the companion jar in the server's mods/ and restart, then:
+#    - live status dashboard:  http://127.0.0.1:9225/
+#    - let the server tune itself, watching only (safe):
+tickwarden daemon
+#    - ...or actually scale simulation/view distance with load:
+tickwarden daemon -apply
+
+# on the Proxmox/Docker host: find and throttle a noisy neighbour
+tickwarden host
+tickwarden iostorm -apply
+```
+
+Settings live in `tickwarden.toml` (`defaults < config < flags`); install the
+daemon as a service with `scripts/install.sh`.
 
 ## Install
 
@@ -140,6 +166,12 @@ which are extrapolated. `bench` and `bench-diff` exist so a contested rule can
 be settled with data instead of an argument.
 
 ## Roadmap
+
+**Status: v1.0 — the roadmap is complete.** Every tier below is built and, where
+it counts, validated on real hardware. v1.0 also adds the things that make it a
+product rather than a toolkit: a web **dashboard**, a **daemon** that runs the
+adaptive controller as a service, a **config file**, and `iostorm -apply` to
+auto-throttle a noisy neighbour. See [CHANGELOG.md](CHANGELOG.md).
 
 | Tier | What | Status |
 |------|------|--------|
