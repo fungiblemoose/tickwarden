@@ -10,6 +10,7 @@ package detect
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -135,11 +136,15 @@ func readCPUInfo() (model string, physical int) {
 		return "", 0
 	}
 	defer f.Close()
+	return parseCPUInfo(f)
+}
 
-	// Count unique (physical id, core id) pairs to get real cores, not threads.
+// parseCPUInfo counts unique (physical id, core id) pairs to get real cores,
+// not threads, and returns the first model name seen.
+func parseCPUInfo(r io.Reader) (model string, physical int) {
 	seen := map[string]struct{}{}
 	var pkg, core string
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := sc.Text()
 		k, v, ok := splitField(line)
@@ -175,7 +180,12 @@ func readMeminfo() (total, avail uint64) {
 		return 0, 0
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
+	return parseMeminfo(f)
+}
+
+// parseMeminfo extracts MemTotal and MemAvailable (kB-valued) as bytes.
+func parseMeminfo(r io.Reader) (total, avail uint64) {
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) < 2 {
@@ -205,7 +215,14 @@ func readCgroupCPUMax() float64 {
 	if err != nil {
 		return 0
 	}
-	fields := strings.Fields(string(b))
+	return parseCgroupCPUMax(string(b))
+}
+
+// parseCgroupCPUMax parses a cgroup-v2 cpu.max value ("<quota> <period>" or
+// "max <period>") into allowed core-equivalents. Returns 0 if unlimited or
+// malformed.
+func parseCgroupCPUMax(s string) float64 {
+	fields := strings.Fields(s)
 	if len(fields) < 2 || fields[0] == "max" {
 		return 0
 	}
@@ -226,7 +243,13 @@ func readCgroupMemMax() uint64 {
 	if err != nil {
 		return 0
 	}
-	s := strings.TrimSpace(string(b))
+	return parseCgroupMemMax(string(b))
+}
+
+// parseCgroupMemMax parses a cgroup-v2 memory.max value ("max" or a byte
+// count). Returns 0 if unlimited or malformed.
+func parseCgroupMemMax(s string) uint64 {
+	s = strings.TrimSpace(s)
 	if s == "max" {
 		return 0
 	}
@@ -241,8 +264,14 @@ func selfCgroupFile(name string) string {
 	if err != nil {
 		return ""
 	}
+	return cgroupFilePath(string(b), name)
+}
+
+// cgroupFilePath resolves a cgroup-v2 control file path from the contents of a
+// /proc/self/cgroup file. Returns "" if no unified (0::) line is present.
+func cgroupFilePath(cgroupContents, name string) string {
 	// cgroup v2 unified line looks like: 0::/some/path
-	for _, line := range strings.Split(string(b), "\n") {
+	for _, line := range strings.Split(cgroupContents, "\n") {
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) == 3 && parts[0] == "0" {
 			return filepath.Join("/sys/fs/cgroup", parts[2], name)
@@ -255,7 +284,14 @@ func selfCgroupFile(name string) string {
 // Best-effort: returns nil if it can't be resolved (common inside containers
 // where the backing device isn't visible).
 func readRotational() *bool {
-	entries, err := os.ReadDir("/sys/block")
+	return readRotationalAt("/sys/block")
+}
+
+// readRotationalAt scans a /sys/block-style directory for the first real
+// physical disk and reports whether it's rotational. Best-effort: returns nil
+// if nothing resolvable is found.
+func readRotationalAt(blockDir string) *bool {
+	entries, err := os.ReadDir(blockDir)
 	if err != nil {
 		return nil
 	}
@@ -265,7 +301,7 @@ func readRotational() *bool {
 		if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") || strings.HasPrefix(name, "dm-") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join("/sys/block", name, "queue", "rotational"))
+		b, err := os.ReadFile(filepath.Join(blockDir, name, "queue", "rotational"))
 		if err != nil {
 			continue
 		}
