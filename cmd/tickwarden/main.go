@@ -22,6 +22,8 @@ import (
 
 	"github.com/fungiblemoose/tickwarden/internal/adaptive"
 	"github.com/fungiblemoose/tickwarden/internal/apply"
+	"github.com/fungiblemoose/tickwarden/internal/config"
+	"github.com/fungiblemoose/tickwarden/internal/daemon"
 	"github.com/fungiblemoose/tickwarden/internal/detect"
 	"github.com/fungiblemoose/tickwarden/internal/hostagent"
 	"github.com/fungiblemoose/tickwarden/internal/hotspots"
@@ -71,6 +73,8 @@ func main() {
 		cmdPregen(os.Args[2:])
 	case "adaptive":
 		cmdAdaptive(os.Args[2:])
+	case "daemon":
+		cmdDaemon(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("tickwarden", version)
 	case "help", "-h", "--help":
@@ -99,6 +103,7 @@ Usage:
   tickwarden hotspots [flags]      top loaded chunks by block-entity count (lag by location)
   tickwarden pregen [flags]        host-load-aware Chunky pregen (pauses when busy/players on)
   tickwarden adaptive [flags]      scale sim/view distance live with load (dry-run by default)
+  tickwarden daemon  [flags]       run adaptive continuously as a service (install: scripts/install.sh)
   tickwarden loadtest [flags]      drive a reproducible Chunky load while benchmarking
   tickwarden version
 
@@ -579,6 +584,11 @@ func cmdIOStorm(args []string) {
 	interval := fs.Duration("interval", time.Second, "delta sampling window")
 	root := fs.String("root", "/sys/fs/cgroup/lxc", "cgroup root to scan (numeric subdirs = LXC CTIDs)")
 	asJSON := fs.Bool("json", false, "emit detected storms as JSON")
+	doApply := fs.Bool("apply", false, "apply a cgroup io.max write throttle to the culprit (mutates the host!)")
+	device := fs.String("device", "", "block device MAJ:MIN for the throttle (auto-discovered if empty)")
+	wbps := fs.Int64("wbps", 0, "write throttle in bytes/s (0 = the suggested cap)")
+	dryRun := fs.Bool("dry-run", false, "with -apply, show the throttle command without writing it")
+	undo := fs.Bool("undo", false, "remove the throttle (io.max wbps=max) from the culprit")
 	fs.Parse(args)
 
 	loads, err := hostagent.Sample(hostagent.Config{ScanRoot: *root, Interval: *interval})
@@ -592,6 +602,39 @@ func cmdIOStorm(args []string) {
 		return
 	}
 	fmt.Print(iostorm.Report(storms))
+
+	if (*doApply || *undo) && len(storms) > 0 {
+		s := storms[0] // act on the worst storm
+		dev := *device
+		if dev == "" {
+			if dev, err = iostorm.DiscoverDevice(*root, s.Writer.CTID); err != nil {
+				fmt.Fprintf(os.Stderr, "\ncouldn't auto-discover device for CTID %d (%v); pass -device MAJ:MIN\n", s.Writer.CTID, err)
+				os.Exit(1)
+			}
+		}
+		opts := iostorm.ApplyOptions{CgroupRoot: *root, Device: dev, Wbps: *wbps, DryRun: *dryRun}
+		var res iostorm.ApplyResult
+		if *undo {
+			res, err = s.Unset(opts)
+		} else {
+			res, err = s.Apply(opts)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "\napply failed (need root + cgroup-v2 io controller):", err)
+			os.Exit(1)
+		}
+		verb := "applied"
+		if *dryRun {
+			verb = "would apply"
+		}
+		if *undo {
+			verb = "removed throttle on"
+		}
+		fmt.Printf("\n%s %s → %s (prior io.max: %q)\n", verb, res.CgroupPath, res.Line, res.PriorIOMax)
+		if res.Floored {
+			fmt.Printf("  note: requested cap was below the %d MB/s floor and clamped up\n", iostorm.DefaultFloorWbps/1_000_000)
+		}
+	}
 }
 
 func cmdOstune(args []string) {
@@ -791,6 +834,76 @@ func cmdAdaptive(args []string) {
 				}
 			}
 		}
+	}
+}
+
+// configPathFromArgs finds a -config/--config value before the flag set is
+// defined, so the config file can supply the flag defaults (defaults<config<flags).
+func configPathFromArgs(args []string) string {
+	for i, a := range args {
+		if a == "-config" || a == "--config" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+		if v, ok := strings.CutPrefix(a, "-config="); ok {
+			return v
+		}
+		if v, ok := strings.CutPrefix(a, "--config="); ok {
+			return v
+		}
+	}
+	return "tickwarden.toml"
+}
+
+func cmdDaemon(args []string) {
+	// Resolve defaults < config file < flags. Load the config first so its values
+	// become the flag defaults; anything the user types on the CLI still wins.
+	fcfg, err := config.Load(configPathFromArgs(args))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+	}
+	for _, w := range fcfg.Warnings {
+		fmt.Fprintln(os.Stderr, "config warning:", w)
+	}
+	d := daemon.DefaultConfig()
+	if fcfg.IsSet("companion_url") {
+		d.BaseURL = fcfg.CompanionURL
+	}
+	if fcfg.IsSet("target_mspt") {
+		d.TargetMSPT = fcfg.TargetMSPT
+	}
+	if fcfg.IsSet("min_sim") {
+		d.MinSim = fcfg.MinSim
+	}
+	if fcfg.IsSet("max_sim") {
+		d.MaxSim = fcfg.MaxSim
+	}
+
+	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+	fs.String("config", "tickwarden.toml", "config file (defaults < config < flags)")
+	url := fs.String("url", d.BaseURL, "companion base URL")
+	interval := fs.Duration("interval", d.Interval, "decision interval")
+	target := fs.Float64("target-mspt", d.TargetMSPT, "keep MSPT at/under this (ms)")
+	minSim := fs.Int("min-sim", d.MinSim, "never drop simulation distance below this")
+	maxSim := fs.Int("max-sim", d.MaxSim, "never raise simulation distance above this")
+	debounce := fs.Int("raise-debounce", d.RaiseDebounce, "consecutive raise decisions before raising")
+	doApply := fs.Bool("apply", false, "actually apply changes (default is dry-run: log only)")
+	fs.Parse(args)
+
+	d.BaseURL, d.Interval, d.TargetMSPT = *url, *interval, *target
+	d.MinSim, d.MaxSim, d.RaiseDebounce, d.Apply = *minSim, *maxSim, *debounce, *doApply
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	mode := "DRY-RUN"
+	if d.Apply {
+		mode = "APPLY"
+	}
+	fmt.Fprintf(os.Stderr, "tickwarden daemon: %s — %s, target %.0fms, sim [%d..%d], every %s\n", mode, d.BaseURL, d.TargetMSPT, d.MinSim, d.MaxSim, d.Interval)
+	if err := daemon.Run(ctx, d, daemon.HTTPDeps(d.BaseURL, os.Stderr)); err != nil && err != context.Canceled {
+		fmt.Fprintln(os.Stderr, "daemon stopped:", err)
+		os.Exit(1)
 	}
 }
 
