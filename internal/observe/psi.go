@@ -59,13 +59,27 @@ func cgroupLevels() []string {
 	const base = "/sys/fs/cgroup"
 	rel := "/"
 	if b, err := os.ReadFile("/proc/self/cgroup"); err == nil {
-		for _, line := range strings.Split(string(b), "\n") {
-			parts := strings.SplitN(line, ":", 3)
-			if len(parts) == 3 && parts[0] == "0" {
-				rel = parts[2]
-			}
+		rel = cgroupRel(string(b), rel)
+	}
+	return cgroupLevelsFrom(base, rel)
+}
+
+// cgroupRel picks the unified (0::) hierarchy path out of /proc/self/cgroup
+// contents, falling back to def when no such line exists.
+func cgroupRel(cgroupContents, def string) string {
+	rel := def
+	for _, line := range strings.Split(cgroupContents, "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) == 3 && parts[0] == "0" {
+			rel = parts[2]
 		}
 	}
+	return rel
+}
+
+// cgroupLevelsFrom builds the leaf→root chain of cgroup directories under base
+// for a relative cgroup path.
+func cgroupLevelsFrom(base, rel string) []string {
 	var dirs []string
 	for cur := filepath.Join(base, rel); strings.HasPrefix(cur, base); cur = filepath.Dir(cur) {
 		dirs = append(dirs, cur)
@@ -127,8 +141,13 @@ func readPSIFile(path string) PSI {
 	if err != nil {
 		return PSI{}
 	}
+	return parsePSI(string(b))
+}
+
+// parsePSI parses PSI file contents into some/full avg10 percentages.
+func parsePSI(s string) PSI {
 	var psi PSI
-	for _, line := range strings.Split(string(b), "\n") {
+	for _, line := range strings.Split(s, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
@@ -149,7 +168,12 @@ func readCPUStat(path string) (nrThrottled, throttledUsec uint64) {
 	if err != nil {
 		return 0, 0
 	}
-	for _, line := range strings.Split(string(b), "\n") {
+	return parseCPUStat(string(b))
+}
+
+// parseCPUStat extracts nr_throttled and throttled_usec from cpu.stat contents.
+func parseCPUStat(s string) (nrThrottled, throttledUsec uint64) {
+	for _, line := range strings.Split(s, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
 			continue
