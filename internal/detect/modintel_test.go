@@ -100,6 +100,18 @@ func TestAdviseFullPerfSetHasNoSuggestions(t *testing.T) {
 	}
 }
 
+func TestAdviseServerCoreNote(t *testing.T) {
+	// servercore runs its own dynamic sim-distance controller — the operator
+	// must be warned not to also enable tickwarden's apply mode.
+	a := Advise(modSet("servercore"))
+	if !containsSubstr(a.Notes, "servercore") || !containsSubstr(a.Notes, "-apply") {
+		t.Fatalf("servercore should produce a controller-conflict note mentioning -apply; Notes=%v", a.Notes)
+	}
+	if containsSubstr(a.Conflicts, "servercore") {
+		t.Fatalf("servercore alone is not a jar conflict; Conflicts=%v", a.Conflicts)
+	}
+}
+
 func TestAdviseVMPNote(t *testing.T) {
 	// vmp present: we add a context note rather than treating it as a win.
 	a := Advise(modSet("vmp"))

@@ -188,10 +188,13 @@ auto-throttle a noisy neighbour. See [CHANGELOG.md](CHANGELOG.md).
 Scales simulation/view distance to the live load instead of fixing one value for
 the worst case. It reads the companion's TPS/MSPT, decides with the measured
 `players × sim²` model, and (with `-apply`) changes distance at runtime — no
-restart, no player kick. Safety: hard render floors, fast-down/slow-up ramps, a
-deadband, and **on-join pre-sizing** — it sizes for your expected peak
-(`players_peak`), so a join finds a peak-safe distance already set rather than
-forcing a drop. Dry-run by default:
+restart, no player kick. Safety: **view (render) distance is never lowered** —
+view costs bandwidth and RAM, not tick CPU, so cutting it recovers nothing; only
+sim sheds load. Plus hard floors, fast-down/slow-up ramps, a deadband, a **50ms
+panic valve** (when ticks are actually being dropped, sim snaps straight to the
+floor instead of stepping), and **on-join pre-sizing** — it sizes for your
+expected peak (`players_peak`), so a join finds a peak-safe distance already set
+rather than forcing a drop. Dry-run by default:
 
 ```sh
 tickwarden adaptive                 # log decisions only (safe to watch)

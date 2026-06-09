@@ -117,6 +117,18 @@ func Advise(m ModSet) ModAdvice {
 			"no spark: add the profiler — you can't tune what you can't measure (also used by `tickwarden bench`)")
 	}
 
+	// --- ServerCore context ---
+	// ServerCore scales simulation distance dynamically on its own — the same
+	// actuator `tickwarden adaptive`/`daemon -apply` drives. Two controllers
+	// writing the same setting will fight (one raises, the other cuts, repeat),
+	// and neither's decisions will make sense in isolation. The jar itself is
+	// fine — the conflict is with OUR apply mode — so this is a note, not a
+	// Conflicts entry: it only bites if the operator also enables -apply.
+	if m.Has("servercore") {
+		a.Notes = append(a.Notes,
+			"servercore installed: it scales simulation distance dynamically itself — don't also run `tickwarden adaptive -apply` or `daemon -apply`, or two controllers will fight over the same setting; pick one")
+	}
+
 	// --- VMP context ---
 	// Very Many Players targets high concurrent-player scaling. It is not wrong
 	// on a small server, but its wins don't show up until player counts are

@@ -72,8 +72,16 @@ companion runtime setter  ──►  PlayerManager.setSimulationDistance / setVi
   global is the scope for v1.
 - **Interaction with `tune -apply`.** Adaptive owns the live value; the static
   `tune` recommendation becomes the *floor/baseline* it adapts above.
-- **Safety valve.** If MSPT ever exceeds a hard ceiling (say 50ms) for K polls,
-  snap straight to MinSim rather than stepping.
+- **Safety valve — BUILT.** At/over `PanicMSPT` (default 50ms, the whole tick
+  budget) the controller snaps sim straight to MinSim instead of stepping.
+  No K-poll counter needed: MSPT is already a ~5s rolling mean of 100 ticks,
+  so a single reading at/over 50ms is sustained overload, not noise.
+- **View is decoupled from sim — BUILT.** View distance costs bandwidth and
+  RAM, not tick CPU, so lowering it recovers zero MSPT. The controller never
+  lowers view (an operator-set value above MaxView is left alone too); it only
+  ratchets view up to keep its `ViewBuffer` lead when sim raises past it. This
+  removes the render-drop fear entirely: render distance simply never moves
+  down.
 
 ## Validation plan
 
