@@ -99,8 +99,94 @@ func TestDecide_RaiseCappedAtCeiling(t *testing.T) {
 
 func TestDecide_ViewFollowsSimWithinBounds(t *testing.T) {
 	d := Decide(State{Players: 1, MSPT: 7, CurrentSim: 10, CurrentView: 14}, cfg())
-	// raised to sim 11 → view = 11 + buffer(4) = 15, within [8,24].
+	// raised to sim 11 → view ratchets up to 11 + buffer(4) = 15, within [8,24].
 	if d.View != 15 {
-		t.Fatalf("view should follow sim (11+4=15), got %d", d.View)
+		t.Fatalf("view should follow sim up (11+4=15), got %d", d.View)
+	}
+}
+
+// View costs bandwidth/RAM, not tick CPU — lowering sim must NOT drag view
+// down with it. Cutting view recovers zero MSPT; it would only be a visible
+// render cut for nothing.
+func TestDecide_LowerNeverCutsView(t *testing.T) {
+	// 4 players, MSPT 48 → lower sim 14→11; view 18 must stay 18, not 11+4=15.
+	d := Decide(State{Players: 4, MSPT: 48, CurrentSim: 14, CurrentView: 18}, cfg())
+	if d.Action != ActionLower {
+		t.Fatalf("over budget should lower, got %s (%s)", d.Action, d.Reason)
+	}
+	if d.View != 18 {
+		t.Fatalf("lowering sim must not cut view: want 18, got %d", d.View)
+	}
+}
+
+// An operator-set view above MaxView is left alone, never "corrected" down.
+func TestDecide_ViewAboveCeilingNotCorrected(t *testing.T) {
+	d := Decide(State{Players: 3, MSPT: 32, CurrentSim: 12, CurrentView: 32}, cfg())
+	if d.View != 32 {
+		t.Fatalf("view above MaxView must be left alone, got %d", d.View)
+	}
+}
+
+// At/over the panic ceiling the server is dropping ticks outright: snap sim
+// straight to the floor, bypassing MaxStepDown — and still don't touch view.
+func TestDecide_PanicSnapsSimToFloor(t *testing.T) {
+	c := cfg()
+	d := Decide(State{Players: 4, MSPT: 55, CurrentSim: 14, CurrentView: 18}, c)
+	if d.Action != ActionLower {
+		t.Fatalf("panic should lower, got %s (%s)", d.Action, d.Reason)
+	}
+	if d.Sim != c.MinSim {
+		t.Fatalf("panic should snap to the floor (%d), not step: got %d", c.MinSim, d.Sim)
+	}
+	if d.View != 18 {
+		t.Fatalf("panic must not cut view either: want 18, got %d", d.View)
+	}
+	if !strings.Contains(d.Reason, "panic") {
+		t.Fatalf("reason should name the panic ceiling: %q", d.Reason)
+	}
+}
+
+// When the host is starving the container, a bad MSPT says nothing about world
+// cost — the controller must hold, not cut, and must say why.
+func TestDecide_HostStarvedHoldsInsteadOfLowering(t *testing.T) {
+	d := Decide(State{Players: 4, MSPT: 48, CurrentSim: 14, CurrentView: 18,
+		HostStarved: true, StarveDetail: "I/O pressure some-avg10=42.0%"}, cfg())
+	if d.Action != ActionHold || d.Sim != 14 {
+		t.Fatalf("starved should hold (not lower), got %s sim=%d", d.Action, d.Sim)
+	}
+	if !strings.Contains(d.Reason, "HOST") || !strings.Contains(d.Reason, "I/O pressure") {
+		t.Fatalf("reason should blame the host and carry the detail: %q", d.Reason)
+	}
+}
+
+// Starvation outranks the panic valve: 60ms of starved MSPT is still not the
+// world's fault, so don't snap to the floor.
+func TestDecide_HostStarvedSuppressesPanic(t *testing.T) {
+	d := Decide(State{Players: 4, MSPT: 60, CurrentSim: 14, CurrentView: 18, HostStarved: true}, cfg())
+	if d.Action != ActionHold || d.Sim != 14 {
+		t.Fatalf("starved must suppress the panic snap, got %s sim=%d", d.Action, d.Sim)
+	}
+}
+
+// Starvation also suppresses raises: a reading taken under pressure is
+// unreliable in both directions.
+func TestDecide_HostStarvedSuppressesRaise(t *testing.T) {
+	d := Decide(State{Players: 1, MSPT: 7, CurrentSim: 10, CurrentView: 14, HostStarved: true}, cfg())
+	if d.Action != ActionHold || d.Sim != 10 {
+		t.Fatalf("starved must not raise either, got %s sim=%d", d.Action, d.Sim)
+	}
+}
+
+// PanicMSPT <= 0 disables the valve: a 55ms reading takes the normal bounded
+// step down instead of snapping to the floor.
+func TestDecide_PanicDisabledStepsNormally(t *testing.T) {
+	c := cfg()
+	c.PanicMSPT = 0
+	d := Decide(State{Players: 4, MSPT: 55, CurrentSim: 14, CurrentView: 18}, c)
+	if d.Action != ActionLower {
+		t.Fatalf("over budget should lower, got %s (%s)", d.Action, d.Reason)
+	}
+	if d.Sim < 14-c.MaxStepDown {
+		t.Fatalf("with panic disabled the drop must respect MaxStepDown, got %d", d.Sim)
 	}
 }

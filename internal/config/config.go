@@ -31,6 +31,7 @@ type Config struct {
 	TargetMSPT   float64 // target_mspt
 	MinSim       int     // min_sim
 	MaxSim       int     // max_sim
+	StarvePSI    float64 // starve_psi
 	Clustered    bool    // clustered
 	Settled      bool    // settled
 	ModsDir      string  // mods_dir
@@ -73,6 +74,7 @@ var knownKeys = map[string]kind{
 	"target_mspt":   kindFloat,
 	"min_sim":       kindInt,
 	"max_sim":       kindInt,
+	"starve_psi":    kindFloat,
 	"clustered":     kindBool,
 	"settled":       kindBool,
 	"mods_dir":      kindString,
@@ -183,8 +185,11 @@ func (c *Config) parseTopLevel(key, val string) {
 			c.warnBadValue(key, val, "number")
 			return
 		}
-		if key == "target_mspt" {
+		switch key {
+		case "target_mspt":
 			c.TargetMSPT = x
+		case "starve_psi":
+			c.StarvePSI = x
 		}
 		c.Set[key] = true
 

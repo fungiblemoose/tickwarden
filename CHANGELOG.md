@@ -2,6 +2,34 @@
 
 All notable changes to tickwarden. Dates are when the work landed.
 
+## Unreleased
+
+- **Adaptive: host-starvation gate.** The controller now reads the container's
+  cgroup PSI and CPU-throttle deltas on every decision (the same signals
+  `watch` correlates) and **holds** when the host — not the world — explains a
+  bad MSPT. A reading taken under starvation measures stolen CPU, not world
+  cost: cutting distance wouldn't recover the ticks, and the slow-raise ramp
+  would take minutes to undo the pointless cut afterwards. The gate also
+  suppresses the panic valve and raises (starved readings are unreliable in
+  both directions) and names the real fix (`tickwarden host` / `iostorm`) in
+  its decision reason. New knob: `-starve-psi` flag on `adaptive`/`daemon` and
+  `starve_psi` in `tickwarden.toml` (PSI some-avg10 %, default 10, 0 disables).
+  This is the cross-layer awareness no in-game-only distance scaler has.
+- **Adaptive: view distance is never lowered.** View costs bandwidth and RAM,
+  not tick CPU, so cutting it recovered zero MSPT — it was a player-visible
+  render cut for nothing. The controller now only sheds load via sim distance;
+  view holds where it is and only ratchets up to keep its lead when sim raises
+  past it. The "players join, my render distance craters" fear is gone by
+  construction: render distance never moves down.
+- **Adaptive: 50ms panic valve.** At/over `PanicMSPT` (default 50ms — the
+  entire tick budget, i.e. ticks are being dropped) sim snaps straight to the
+  floor instead of stepping down, then the slow-raise ramp earns it back.
+  Closes the safety-valve design question from `docs/ADAPTIVE.md`.
+- **Mod intelligence: ServerCore controller-conflict note.** ServerCore scales
+  simulation distance dynamically itself; `tune -mods-dir` now warns not to
+  also run `tickwarden adaptive -apply` / `daemon -apply`, so two controllers
+  never fight over the same setting.
+
 ## v1.0.0 — 2026-06-04
 
 The tool is feature-complete: it tunes, observes, diagnoses below the JVM, and
