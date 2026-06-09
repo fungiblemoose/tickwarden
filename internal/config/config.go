@@ -32,6 +32,9 @@ type Config struct {
 	MinSim       int     // min_sim
 	MaxSim       int     // max_sim
 	StarvePSI    float64 // starve_psi
+	GCStallPct   float64 // gc_stall_pct
+	UIAddr       string  // ui_addr
+	UIToken      string  // ui_token
 	Clustered    bool    // clustered
 	Settled      bool    // settled
 	ModsDir      string  // mods_dir
@@ -75,6 +78,9 @@ var knownKeys = map[string]kind{
 	"min_sim":       kindInt,
 	"max_sim":       kindInt,
 	"starve_psi":    kindFloat,
+	"gc_stall_pct":  kindFloat,
+	"ui_addr":       kindString,
+	"ui_token":      kindString,
 	"clustered":     kindBool,
 	"settled":       kindBool,
 	"mods_dir":      kindString,
@@ -160,6 +166,10 @@ func (c *Config) parseTopLevel(key, val string) {
 			c.CompanionURL = s
 		case "mods_dir":
 			c.ModsDir = s
+		case "ui_addr":
+			c.UIAddr = s
+		case "ui_token":
+			c.UIToken = s
 		}
 		c.Set[key] = true
 
@@ -190,6 +200,8 @@ func (c *Config) parseTopLevel(key, val string) {
 			c.TargetMSPT = x
 		case "starve_psi":
 			c.StarvePSI = x
+		case "gc_stall_pct":
+			c.GCStallPct = x
 		}
 		c.Set[key] = true
 

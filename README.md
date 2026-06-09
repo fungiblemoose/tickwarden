@@ -26,6 +26,19 @@ the [releases page](https://github.com/fungiblemoose/tickwarden/releases).
 
 ## Quickstart
 
+Starting from nothing? `init` scaffolds a complete Fabric server that is tuned
+to your hardware from its very first boot — server jar, the recommended perf
+mods (lithium, c2me, ferritecore, krypton, scalablelux, spark) at the right
+versions from Modrinth, a tuned `server.properties`, a `start.sh` with sized
+heap + GC flags, and a systemd unit:
+
+```sh
+tickwarden init -dir minecraft -mc 1.21.5 -players 6 -accept-eula
+sh minecraft/start.sh
+```
+
+Already running a server? Tune it in place:
+
 ```sh
 # 1. tune to your hardware (reads cores, RAM, cgroup limits, installed mods)
 tickwarden optimize -mods-dir /path/to/mods
@@ -34,7 +47,9 @@ tickwarden optimize -mods-dir /path/to/mods
 #    - live status dashboard:  http://127.0.0.1:9225/
 #    - let the server tune itself, watching only (safe):
 tickwarden daemon
-#    - ...or actually scale simulation/view distance with load:
+#    - ...with a web control plane (live status, decision log, knob changes):
+tickwarden daemon -ui 127.0.0.1:9226
+#    - ...or actually scale simulation distance with load:
 tickwarden daemon -apply
 
 # on the Proxmox/Docker host: find and throttle a noisy neighbour
@@ -58,6 +73,18 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o tickwarden ./cmd/tickwarden
 ```
 
 ## Commands
+
+**Provisioning**:
+
+```sh
+tickwarden init -dir minecraft    # scaffold a NEW Fabric server, tuned from first boot
+tickwarden init -accept-eula      # ...and accept Minecraft's EULA (your act, never implied)
+tickwarden init -skip-downloads   # config files only (offline; fetch jars yourself)
+```
+
+`init` never accepts the EULA for you, refuses to overwrite an existing
+server's files, and writes the JVM flags into a `start.sh` it owns — the
+"report but never write JVM flags" rule still holds for live servers.
 
 **Tuning** (run anywhere, including inside the container):
 
@@ -115,6 +142,7 @@ cd companion && ./gradlew build    # needs JDK 21
 # drop build/libs/tickwarden-companion-*.jar into the server's mods/, then restart
 curl http://127.0.0.1:9225/tps        # {"tps":20.00,"mspt":6.3,"players":0,"players_peak":1}
 curl http://127.0.0.1:9225/hotspots   # [{"dimension":"...","x":-2,"z":0,"block_entities":2}]
+curl http://127.0.0.1:9225/jvm        # heap + cumulative GC counters (0.6.0+, feeds the GC gate)
 ```
 
 It binds `127.0.0.1` only (port `9225`, override with `-Dtickwarden.port=` or
@@ -196,13 +224,30 @@ floor instead of stepping), and **on-join pre-sizing** — it sizes for your
 expected peak (`players_peak`), so a join finds a peak-safe distance already set
 rather than forcing a drop.
 
-It's also **host-aware**, which no in-game distance scaler is: each decision
-reads the container's cgroup PSI and CPU-throttling (the same signals as
-`watch`), and when the *host* — a noisy neighbour, a quota — explains a bad
-MSPT, it holds instead of cutting. An MSPT reading taken under starvation
-measures stolen CPU, not world cost; shrinking the world wouldn't give the
-ticks back, so it points you at `tickwarden host`/`iostorm` instead. Threshold:
-`-starve-psi` / `starve_psi` (PSI some-avg10 %, default 10; 0 disables).
+It's also **cause-aware**, which no in-game distance scaler is. Each decision
+checks *why* MSPT is high before acting:
+
+- **Host starvation** — cgroup PSI and CPU-throttling (the same signals as
+  `watch`). When a noisy neighbour or a quota explains the spike, it holds and
+  points you at `tickwarden host`/`iostorm`: shrinking the world wouldn't give
+  stolen CPU back. Threshold: `-starve-psi` / `starve_psi` (PSI some-avg10 %,
+  default 10; 0 disables).
+- **GC stalls** — the companion's `/jvm` endpoint (≥0.6.0) exposes heap and GC
+  counters; when the collector ate the poll window (a 300ms G1 pause *is* a
+  6-tick freeze), it holds and points you at heap/GC flags via `tickwarden
+  tune`. Threshold: `-gc-stall-pct` / `gc_stall_pct` (% of wall clock, default
+  15; 0 disables).
+
+### The daemon's web control plane (`-ui`)
+
+`tickwarden daemon -ui 127.0.0.1:9226` serves a self-contained dashboard (no
+CDNs, works air-gapped): live TPS/MSPT, current distances, both cause gates
+with their reasons, heap occupancy, the decision history, and **live knob
+editing** (target MSPT, sim bounds, gate thresholds, the dry-run/apply
+toggle) — changes take effect on the next decision, no restart. Knob changes
+are runtime-only; `tickwarden.toml` stays the durable source. Off by default;
+a non-loopback bind is refused unless `-ui-token` is set, because the config
+endpoint changes a live server.
 
 Dry-run by default:
 

@@ -177,6 +177,19 @@ func TestDecide_HostStarvedSuppressesRaise(t *testing.T) {
 	}
 }
 
+// When the JVM's GC ate the poll window, the MSPT spike measures pause time,
+// not world cost — hold, and point at the real fix.
+func TestDecide_GCStalledHoldsInsteadOfLowering(t *testing.T) {
+	d := Decide(State{Players: 4, MSPT: 48, CurrentSim: 14, CurrentView: 18,
+		GCStalled: true, GCDetail: "GC ran 3000ms in the last 10s"}, cfg())
+	if d.Action != ActionHold || d.Sim != 14 {
+		t.Fatalf("GC-stalled should hold (not lower), got %s sim=%d", d.Action, d.Sim)
+	}
+	if !strings.Contains(d.Reason, "GC") || !strings.Contains(d.Reason, "tune") {
+		t.Fatalf("reason should blame the collector and point at tune: %q", d.Reason)
+	}
+}
+
 // PanicMSPT <= 0 disables the valve: a 55ms reading takes the normal bounded
 // step down instead of snapping to the floor.
 func TestDecide_PanicDisabledStepsNormally(t *testing.T) {

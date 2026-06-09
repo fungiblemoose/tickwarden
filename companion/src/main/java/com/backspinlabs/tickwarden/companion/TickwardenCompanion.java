@@ -11,6 +11,9 @@ import net.minecraft.world.level.chunk.LevelChunk;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.management.GarbageCollectorMXBean;
+import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryUsage;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -490,11 +493,27 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
                     os.write(body);
                 }
             });
+            // JVM telemetry — heap occupancy and GC counters. A multi-hundred-ms
+            // GC pause is a multi-tick freeze that looks identical to world load
+            // in the MSPT number; exposing the cumulative GC counters lets the
+            // tickwarden daemon diff them between polls and attribute a spike to
+            // the collector instead of cutting distance for it. MXBean reads are
+            // thread-safe and cost nothing per tick, so this runs entirely on the
+            // HTTP handler thread.
+            http.createContext("/jvm", exchange -> {
+                byte[] body = jvmJson().getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, body.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(body);
+                }
+            });
             http.setExecutor(null);
             http.start();
             System.out.println("[tickwarden-companion] status page up on http://127.0.0.1:" + port + "/");
             System.out.println("[tickwarden-companion] TPS endpoint up on http://127.0.0.1:" + port + "/tps");
             System.out.println("[tickwarden-companion] hotspots endpoint up on http://127.0.0.1:" + port + "/hotspots");
+            System.out.println("[tickwarden-companion] JVM endpoint up on http://127.0.0.1:" + port + "/jvm");
         } catch (IOException e) {
             System.err.println("[tickwarden-companion] failed to start HTTP endpoint on port " + port + ": " + e.getMessage());
         }
@@ -519,6 +538,42 @@ public class TickwardenCompanion implements DedicatedServerModInitializer {
                     escape(h.dimension()), h.x(), h.z(), h.blockEntities()));
         }
         sb.append(']');
+        return sb.toString();
+    }
+
+    /**
+     * Serialize heap usage and per-collector GC counters. The counts and times
+     * are CUMULATIVE since JVM start (that's what the MXBeans expose); consumers
+     * must diff successive reads — {@code gc_count}/{@code gc_time_ms} totals are
+     * included so a consumer only needs to track one pair. Keys are snake_case
+     * and MUST match what internal/observe decodes.
+     */
+    private String jvmJson() {
+        MemoryUsage heap = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format(Locale.ROOT,
+                "{\"heap_used\":%d,\"heap_committed\":%d,\"heap_max\":%d,\"gc\":[",
+                heap.getUsed(), heap.getCommitted(), heap.getMax()));
+        long totalCount = 0, totalTimeMs = 0;
+        boolean first = true;
+        for (GarbageCollectorMXBean gc : ManagementFactory.getGarbageCollectorMXBeans()) {
+            long count = gc.getCollectionCount();
+            long timeMs = gc.getCollectionTime();
+            if (count < 0) {
+                continue; // collector doesn't report; skip rather than lie with -1
+            }
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append(String.format(Locale.ROOT,
+                    "{\"name\":\"%s\",\"count\":%d,\"time_ms\":%d}",
+                    escape(gc.getName()), count, Math.max(0, timeMs)));
+            totalCount += count;
+            totalTimeMs += Math.max(0, timeMs);
+        }
+        sb.append(String.format(Locale.ROOT,
+                "],\"gc_count\":%d,\"gc_time_ms\":%d}", totalCount, totalTimeMs));
         return sb.toString();
     }
 

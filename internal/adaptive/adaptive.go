@@ -21,11 +21,13 @@
 // is actually dropping ticks, so sim snaps straight to the floor instead of
 // stepping down — and the slow-raise ramp earns the distance back afterwards.
 //
-// And a host-starvation gate: when cgroup PSI / throttling shows the HOST is
-// the bottleneck (State.HostStarved, fed by observe.StarvedNow), the controller
-// holds instead of acting — an MSPT reading taken under starvation measures
-// stolen CPU, not world cost, and cutting distance can't give the ticks back.
-// This is the cross-layer awareness no in-game-only scaler has.
+// And two cause-aware gates — the cross-layer awareness no in-game-only scaler
+// has. When cgroup PSI / throttling shows the HOST is the bottleneck
+// (State.HostStarved, fed by observe.StarvedNow), or the JVM's garbage
+// collector dominated the poll window (State.GCStalled, fed by
+// observe.GCStalledNow), the controller holds instead of acting: an MSPT
+// reading taken under starvation or mid-GC measures stolen CPU or pause time,
+// not world cost, and cutting distance can't give those ticks back.
 //
 // Decide is a pure function (no I/O), so it's fully unit-testable; the live loop
 // that polls the companion and applies the result lives in the command layer.
@@ -59,6 +61,14 @@ type State struct {
 	// human explanation, carried into the decision's Reason.
 	HostStarved  bool
 	StarveDetail string
+
+	// GCStalled reports that the JVM's garbage collector dominated the last
+	// poll window (see observe.GCStalledNow). A long GC pause is a multi-tick
+	// freeze that reads exactly like world load in the MSPT number, but a
+	// smaller world won't stop the pauses — the fix is heap size / GC flags.
+	// While true the controller holds, same as HostStarved.
+	GCStalled bool
+	GCDetail  string
 }
 
 // Config bounds and tunes the controller. Floors are the render-drop protection.
@@ -153,6 +163,19 @@ func Decide(s State, cfg Config) Decision {
 			detail = "cgroup pressure/throttling"
 		}
 		return hold(fmt.Sprintf("MSPT %.1f but the HOST is the bottleneck (%s) — distance won't fix that, holding; see `tickwarden host` / `iostorm`", s.MSPT, detail))
+	}
+
+	// GC-STALL GATE. Same shape as the starvation gate, different culprit: when
+	// the collector ate the window, the MSPT spike measures pause time, not
+	// world cost. Cutting distance would shrink the heap's live set a little,
+	// eventually — but the immediate, correct fix is heap size / GC flags, and
+	// a cut here would be slow-ramped back for nothing once the GC settles.
+	if s.GCStalled {
+		detail := s.GCDetail
+		if detail == "" {
+			detail = "GC dominated the poll window"
+		}
+		return hold(fmt.Sprintf("MSPT %.1f but the JVM's GC, not the world, ate the window (%s) — holding; fix heap/GC flags, see `tickwarden tune`", s.MSPT, detail))
 	}
 
 	// SAFETY VALVE. At/over PanicMSPT the server is dropping ticks outright

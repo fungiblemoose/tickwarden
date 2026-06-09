@@ -33,6 +33,7 @@ import (
 	"github.com/fungiblemoose/tickwarden/internal/optimize"
 	"github.com/fungiblemoose/tickwarden/internal/ostune"
 	"github.com/fungiblemoose/tickwarden/internal/pregen"
+	"github.com/fungiblemoose/tickwarden/internal/scaffold"
 	"github.com/fungiblemoose/tickwarden/internal/thermal"
 	"github.com/fungiblemoose/tickwarden/internal/tune"
 )
@@ -45,6 +46,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "init":
+		cmdInit(os.Args[2:])
 	case "optimize":
 		cmdOptimize(os.Args[2:])
 	case "detect":
@@ -90,6 +93,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `tickwarden — hardware-aware, host-aware Minecraft server tuning
 
 Usage:
+  tickwarden init [flags]          scaffold a NEW Fabric server, tuned to this hardware from first boot
   tickwarden optimize [flags]      one-shot: detect + mods + players → the full maxed-but-safe plan
   tickwarden detect [-json]        print the detected host/cgroup profile
   tickwarden tune   [-json]        recommend server settings, with reasons
@@ -109,6 +113,70 @@ Usage:
 
 Run a command with -h for its flags.
 `)
+}
+
+func cmdInit(args []string) {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	dir := fs.String("dir", "minecraft", "directory to scaffold the server into")
+	mc := fs.String("mc", "1.21.5", "Minecraft version (must have a Fabric loader build)")
+	players := fs.Int("players", 4, "expected PEAK concurrent players — sizes heap and distances")
+	clustered := fs.Bool("clustered", false, "players congregate (shared base/hub) rather than scatter")
+	settled := fs.Bool("settled", false, "survival play in pregenerated terrain (not flying/exploring)")
+	acceptEULA := fs.Bool("accept-eula", false, "write eula=true — by passing this YOU are agreeing to Minecraft's EULA (https://aka.ms/MinecraftEULA)")
+	skipDownloads := fs.Bool("skip-downloads", false, "write the tuned config files only; skip fetching the server jar and mods")
+	fs.Parse(args)
+
+	// Tune to THIS hardware. PerfMods=true is honest here, not optimistic:
+	// init installs the perf stack below, so the higher per-core budget the
+	// tuner keys on those mods will actually hold.
+	profile := detect.Detect()
+	topts := tune.DefaultOptions()
+	topts.Players = *players
+	topts.PerfMods = true
+	topts.Clustered, topts.Settled = *clustered, *settled
+	plan := tune.Recommend(profile, topts)
+
+	opts := scaffold.Options{
+		Dir: *dir, MCVersion: *mc, Players: *players,
+		Clustered: *clustered, Settled: *settled, AcceptEULA: *acceptEULA,
+	}
+	files := scaffold.RenderFiles(opts, plan)
+	if err := scaffold.WriteFiles(*dir, files); err != nil {
+		fmt.Fprintln(os.Stderr, "init failed:", err)
+		os.Exit(1)
+	}
+	for _, f := range files {
+		fmt.Printf("wrote %s\n", f.Path)
+	}
+
+	if !*skipDownloads {
+		fetcher := scaffold.NewHTTPFetcher()
+		manifest, err := scaffold.Resolve(*mc, fetcher)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "init failed:", err)
+			os.Exit(1)
+		}
+		failed, err := scaffold.FetchAll(manifest, *dir, fetcher, func(line string) { fmt.Println(line) })
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "init failed:", err)
+			os.Exit(1)
+		}
+		for _, m := range manifest.Missing {
+			fmt.Printf("note: skipped %s\n", m)
+		}
+		for _, f := range failed {
+			fmt.Printf("note: download failed, fetch manually: %s\n", f)
+		}
+	}
+
+	fmt.Println("\nnext steps:")
+	if !*acceptEULA {
+		fmt.Printf("  1. accept the EULA: edit %s/eula.txt (or re-run with -accept-eula)\n", *dir)
+	}
+	fmt.Printf("  2. drop the tickwarden companion jar into %s/mods/ for live TPS + the daemon\n", *dir)
+	fmt.Println("     (github.com/fungiblemoose/tickwarden/releases — or build companion/ with JDK 21)")
+	fmt.Printf("  3. start it: sh %s/start.sh  (or install %s/minecraft.service for systemd)\n", *dir, *dir)
+	fmt.Println("  4. let it tune itself: tickwarden daemon -ui 127.0.0.1:9226   (then -apply when happy)")
 }
 
 func cmdOptimize(args []string) {
@@ -895,6 +963,15 @@ func cmdDaemon(args []string) {
 	if fcfg.IsSet("starve_psi") {
 		d.StarvePSI = fcfg.StarvePSI
 	}
+	if fcfg.IsSet("gc_stall_pct") {
+		d.GCStallPct = fcfg.GCStallPct
+	}
+	if fcfg.IsSet("ui_addr") {
+		d.UIAddr = fcfg.UIAddr
+	}
+	if fcfg.IsSet("ui_token") {
+		d.UIToken = fcfg.UIToken
+	}
 	if fcfg.IsSet("max_sim") {
 		d.MaxSim = fcfg.MaxSim
 	}
@@ -908,12 +985,16 @@ func cmdDaemon(args []string) {
 	maxSim := fs.Int("max-sim", d.MaxSim, "never raise simulation distance above this")
 	debounce := fs.Int("raise-debounce", d.RaiseDebounce, "consecutive raise decisions before raising")
 	starvePSI := fs.Float64("starve-psi", d.StarvePSI, "cgroup PSI some-avg10 (%) at/over which a dip is the host's fault and distance is held (0 disables)")
+	gcStall := fs.Float64("gc-stall-pct", d.GCStallPct, "share of the poll window (%) the JVM's GC must eat for a dip to be the collector's fault (needs companion >= 0.6.0; 0 disables)")
+	uiAddr := fs.String("ui", d.UIAddr, "serve the web control plane on this address (e.g. 127.0.0.1:9226; empty disables; non-loopback needs -ui-token)")
+	uiToken := fs.String("ui-token", d.UIToken, "require this token on every control-plane request (X-Tickwarden-Token header or ?token=)")
 	doApply := fs.Bool("apply", false, "actually apply changes (default is dry-run: log only)")
 	fs.Parse(args)
 
 	d.BaseURL, d.Interval, d.TargetMSPT = *url, *interval, *target
 	d.MinSim, d.MaxSim, d.RaiseDebounce, d.Apply = *minSim, *maxSim, *debounce, *doApply
-	d.StarvePSI = *starvePSI
+	d.StarvePSI, d.GCStallPct = *starvePSI, *gcStall
+	d.UIAddr, d.UIToken = *uiAddr, *uiToken
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

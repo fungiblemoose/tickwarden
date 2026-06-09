@@ -4,6 +4,32 @@ All notable changes to tickwarden. Dates are when the work landed.
 
 ## Unreleased
 
+- **`tickwarden init` — scaffold a server, don't just tune one.** Provisions a
+  complete Fabric server tuned to the hardware from first boot: the server
+  launcher jar (Fabric meta API), the recommended perf stack at the right
+  versions from Modrinth (lithium, ferrite-core, krypton, c2me, scalablelux,
+  spark; a mod without a build for the target MC version is skipped with a
+  note), a tuned `server.properties`, a `start.sh` with sized heap and
+  G1-Aikar/ZGC flags (the one place tickwarden writes JVM flags — it owns the
+  file because it created it), `tickwarden.toml` with the workload assumptions,
+  and a systemd unit. Scaffolds, doesn't supervise. Never accepts the EULA for
+  you (`-accept-eula` is your explicit act) and refuses to overwrite an
+  existing server's files.
+- **Daemon web control plane (`-ui`).** A self-contained dashboard served by
+  the daemon (not the companion — the game JVM stays minimal): live TPS/MSPT,
+  distances, both cause gates with reasons, heap occupancy, the decision
+  history (previously journald-only), and live knob editing including the
+  dry-run/apply toggle — effective on the next decision, no restart. Off by
+  default; non-loopback binds are refused without `-ui-token`. Config keys:
+  `ui_addr`, `ui_token`.
+- **Companion 0.6.0: `/jvm` endpoint + GC-stall gate.** The companion now
+  exposes heap occupancy and cumulative GC counters (MXBeans, zero per-tick
+  cost). The daemon diffs them between polls and **holds** when the collector
+  ate the window — a 300ms G1 pause is a 6-tick freeze that previously read
+  exactly like world load and triggered a pointless distance cut. The TPS-dip
+  triage is now complete: world load vs host starvation vs GC, each with its
+  own fix named in the decision reason. Knob: `-gc-stall-pct` / `gc_stall_pct`
+  (default 15% of wall clock, 0 disables).
 - **Adaptive: host-starvation gate.** The controller now reads the container's
   cgroup PSI and CPU-throttle deltas on every decision (the same signals
   `watch` correlates) and **holds** when the host — not the world — explains a

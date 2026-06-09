@@ -76,6 +76,14 @@ companion runtime setter  ──►  PlayerManager.setSimulationDistance / setVi
   budget) the controller snaps sim straight to MinSim instead of stepping.
   No K-poll counter needed: MSPT is already a ~5s rolling mean of 100 ticks,
   so a single reading at/over 50ms is sustained overload, not noise.
+- **GC-stall gate — BUILT.** The other "wrong culprit" case: a long GC pause
+  reads exactly like world load in the MSPT number. The companion (0.6.0)
+  exposes cumulative GC counters on `/jvm`; the daemon diffs them per poll and
+  holds when the collector consumed ≥ `gc_stall_pct` of the window (default
+  15%), naming heap/GC flags as the real fix. Counter regressions (JVM
+  restart) are ignored. With this plus the starvation gate, every TPS dip is
+  triaged: world load (act), host starvation (hold, fix the host), or GC
+  (hold, fix the JVM).
 - **Host-starvation gate — BUILT.** The controller's open blind spot was that
   it couldn't tell *why* MSPT was high: a noisy neighbour starving the cgroup
   produces the same number as a heavy world, but cutting distance only fixes
