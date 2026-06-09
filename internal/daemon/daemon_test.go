@@ -54,8 +54,8 @@ func newLoop(cfg Config, snap observe.Snapshot, snapErr error, apply func(int, i
 	full.Apply = cfg.Apply
 
 	return &loop{
-		cfg: full,
-		ac:  full.adaptiveConfig(),
+		cfg:   full,
+		store: NewStore(full.knobs()),
 		deps: Deps{
 			Fetch: func() (observe.Snapshot, error) { return snap, snapErr },
 			Apply: apply,
