@@ -34,6 +34,12 @@ type Config struct {
 	RaiseDebounce int           // consecutive raise decisions required before raising
 	Apply         bool          // actually apply changes (false = dry-run, log only)
 
+	// StarvePSI is the cgroup PSI some-avg10 percentage at/over which a tick
+	// dip is blamed on the HOST rather than the world, making the controller
+	// hold instead of cutting distance (see adaptive.State.HostStarved).
+	// <= 0 disables the starvation gate entirely.
+	StarvePSI float64
+
 	// StatusEvery is how often a heartbeat status line is emitted regardless of
 	// whether anything changed, so the journal shows liveness during quiet
 	// periods. It is rounded to a whole number of intervals (minimum one).
@@ -52,6 +58,7 @@ func DefaultConfig() Config {
 		MaxSim:        ac.MaxSim,
 		RaiseDebounce: 3,
 		Apply:         false,
+		StarvePSI:     observe.DefaultThresholds().PSIPressurePct,
 		StatusEvery:   5 * time.Minute,
 	}
 }
@@ -75,6 +82,10 @@ type Deps struct {
 	Fetch func() (observe.Snapshot, error)
 	// Apply enforces a new simulation/view distance on the server.
 	Apply func(sim, view int) error
+	// Pressure reads the current cgroup pressure, feeding the starvation gate.
+	// If nil, observe.ReadPressure is used (Run installs it); tests inject a
+	// fake. Only consulted when Config.StarvePSI > 0.
+	Pressure func() observe.Pressure
 	// Logger receives structured decision and status lines. If nil, output is
 	// discarded.
 	Logger *slog.Logger
@@ -88,10 +99,11 @@ type Deps struct {
 func HTTPDeps(baseURL string, w io.Writer) Deps {
 	logger := slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	return Deps{
-		Fetch:  func() (observe.Snapshot, error) { return observe.FetchSnapshot(baseURL + "/tps") },
-		Apply:  func(sim, view int) error { return applyDistance(baseURL, sim, view) },
-		Logger: logger,
-		Now:    time.Now,
+		Fetch:    func() (observe.Snapshot, error) { return observe.FetchSnapshot(baseURL + "/tps") },
+		Apply:    func(sim, view int) error { return applyDistance(baseURL, sim, view) },
+		Pressure: observe.ReadPressure,
+		Logger:   logger,
+		Now:      time.Now,
 	}
 }
 
@@ -123,6 +135,12 @@ type loop struct {
 	ticks  int // total steps taken (drives the status heartbeat)
 	// statusEveryN is StatusEvery measured in whole intervals (>=1).
 	statusEveryN int
+	// prevPressure is the last cgroup-pressure reading, kept so the starvation
+	// gate can detect NEW throttle events (the counters are cumulative since
+	// boot, so only the delta between polls means "throttled just now").
+	// prevPressureSet distinguishes "no reading yet" from a zero-value one.
+	prevPressure    observe.Pressure
+	prevPressureSet bool
 }
 
 // Run drives the adaptive loop continuously until ctx is cancelled, at which
@@ -138,6 +156,9 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	if deps.Apply == nil {
 		hd := HTTPDeps(cfg.BaseURL, io.Discard)
 		deps.Apply = hd.Apply
+	}
+	if deps.Pressure == nil {
+		deps.Pressure = observe.ReadPressure
 	}
 	if deps.Logger == nil {
 		deps.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -183,6 +204,7 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		"sim_min", cfg.MinSim,
 		"sim_max", cfg.MaxSim,
 		"raise_debounce", cfg.RaiseDebounce,
+		"starve_psi", cfg.StarvePSI,
 	)
 
 	ticker := time.NewTicker(cfg.Interval)
@@ -215,13 +237,28 @@ func (l *loop) step() {
 		return
 	}
 
-	d := adaptive.Decide(adaptive.State{
+	st := adaptive.State{
 		Players:     snap.Players,
 		PlayersPeak: snap.PlayersPeak,
 		MSPT:        snap.MSPT,
 		CurrentSim:  snap.Sim,
 		CurrentView: snap.View,
-	}, l.ac)
+	}
+	// Starvation gate: read cgroup pressure and let the controller hold when
+	// the host, not the world, explains a bad MSPT. The first poll compares
+	// the throttle counters against themselves (delta zero) so a cumulative
+	// count from before the daemon started doesn't read as "starved now".
+	if l.cfg.StarvePSI > 0 && l.deps.Pressure != nil {
+		cur := l.deps.Pressure()
+		prev := cur
+		if l.prevPressureSet {
+			prev = l.prevPressure
+		}
+		st.HostStarved, st.StarveDetail = observe.StarvedNow(prev, cur, l.cfg.StarvePSI)
+		l.prevPressure, l.prevPressureSet = cur, true
+	}
+
+	d := adaptive.Decide(st, l.ac)
 
 	// Heartbeat: a periodic liveness line even when nothing changes.
 	if l.statusEveryN > 0 && l.ticks%l.statusEveryN == 0 {
@@ -232,6 +269,7 @@ func (l *loop) step() {
 			"players_peak", snap.PlayersPeak,
 			"sim", snap.Sim,
 			"view", snap.View,
+			"host_starved", st.HostStarved,
 		)
 	}
 

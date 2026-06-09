@@ -780,6 +780,7 @@ func cmdAdaptive(args []string) {
 	minSim := fs.Int("min-sim", adaptive.DefaultConfig().MinSim, "never drop simulation distance below this")
 	maxSim := fs.Int("max-sim", adaptive.DefaultConfig().MaxSim, "never raise simulation distance above this")
 	raiseDebounce := fs.Int("raise-debounce", 3, "consecutive raise decisions required before raising")
+	starvePSI := fs.Float64("starve-psi", observe.DefaultThresholds().PSIPressurePct, "cgroup PSI some-avg10 (%) at/over which a dip is the host's fault and distance is held (0 disables)")
 	doApply := fs.Bool("apply", false, "actually apply changes (default is dry-run: log only)")
 	fs.Parse(args)
 
@@ -797,6 +798,8 @@ func cmdAdaptive(args []string) {
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
 	raiseStreak := 0
+	var prevPressure observe.Pressure
+	prevPressureSet := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -811,7 +814,20 @@ func cmdAdaptive(args []string) {
 				fmt.Fprintln(os.Stderr, "adaptive: companion not reporting sim/view yet (needs companion >= 0.4.0)")
 				continue
 			}
-			d := adaptive.Decide(adaptive.State{Players: snap.Players, PlayersPeak: snap.PlayersPeak, MSPT: snap.MSPT, CurrentSim: snap.Sim, CurrentView: snap.View}, cfg)
+			st := adaptive.State{Players: snap.Players, PlayersPeak: snap.PlayersPeak, MSPT: snap.MSPT, CurrentSim: snap.Sim, CurrentView: snap.View}
+			// Starvation gate: hold when the host, not the world, explains a
+			// bad MSPT. First poll compares throttle counters against
+			// themselves so a stale cumulative count doesn't read as starved.
+			if *starvePSI > 0 {
+				cur := observe.ReadPressure()
+				prev := cur
+				if prevPressureSet {
+					prev = prevPressure
+				}
+				st.HostStarved, st.StarveDetail = observe.StarvedNow(prev, cur, *starvePSI)
+				prevPressure, prevPressureSet = cur, true
+			}
+			d := adaptive.Decide(st, cfg)
 
 			// Debounce raises: only act after the controller asks repeatedly.
 			// Lowering is immediate (protect TPS).
@@ -876,6 +892,9 @@ func cmdDaemon(args []string) {
 	if fcfg.IsSet("min_sim") {
 		d.MinSim = fcfg.MinSim
 	}
+	if fcfg.IsSet("starve_psi") {
+		d.StarvePSI = fcfg.StarvePSI
+	}
 	if fcfg.IsSet("max_sim") {
 		d.MaxSim = fcfg.MaxSim
 	}
@@ -888,11 +907,13 @@ func cmdDaemon(args []string) {
 	minSim := fs.Int("min-sim", d.MinSim, "never drop simulation distance below this")
 	maxSim := fs.Int("max-sim", d.MaxSim, "never raise simulation distance above this")
 	debounce := fs.Int("raise-debounce", d.RaiseDebounce, "consecutive raise decisions before raising")
+	starvePSI := fs.Float64("starve-psi", d.StarvePSI, "cgroup PSI some-avg10 (%) at/over which a dip is the host's fault and distance is held (0 disables)")
 	doApply := fs.Bool("apply", false, "actually apply changes (default is dry-run: log only)")
 	fs.Parse(args)
 
 	d.BaseURL, d.Interval, d.TargetMSPT = *url, *interval, *target
 	d.MinSim, d.MaxSim, d.RaiseDebounce, d.Apply = *minSim, *maxSim, *debounce, *doApply
+	d.StarvePSI = *starvePSI
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -21,6 +21,12 @@
 // is actually dropping ticks, so sim snaps straight to the floor instead of
 // stepping down — and the slow-raise ramp earns the distance back afterwards.
 //
+// And a host-starvation gate: when cgroup PSI / throttling shows the HOST is
+// the bottleneck (State.HostStarved, fed by observe.StarvedNow), the controller
+// holds instead of acting — an MSPT reading taken under starvation measures
+// stolen CPU, not world cost, and cutting distance can't give the ticks back.
+// This is the cross-layer awareness no in-game-only scaler has.
+//
 // Decide is a pure function (no I/O), so it's fully unit-testable; the live loop
 // that polls the companion and applies the result lives in the command layer.
 //
@@ -35,13 +41,24 @@ import (
 	"math"
 )
 
-// State is a snapshot the controller reasons over (from the companion).
+// State is a snapshot the controller reasons over (from the companion, plus
+// the caller's cgroup-pressure reading).
 type State struct {
 	Players     int     // current online players
 	PlayersPeak int     // expected peak (persisted) — size for this, not just current
 	MSPT        float64 // current mean tick time, ms
 	CurrentSim  int     // simulation-distance in effect
 	CurrentView int     // view-distance in effect
+
+	// HostStarved reports that cgroup PSI / CPU-quota throttling shows the
+	// HOST, not the world, is the bottleneck right now (see observe.StarvedNow).
+	// While true the controller holds: the sim² model assumes the tick thread
+	// gets the CPU it asks for, so an MSPT reading taken under starvation says
+	// nothing about world cost — cutting distance won't recover the ticks, and
+	// raising would over-extend once the pressure lifts. StarveDetail is the
+	// human explanation, carried into the decision's Reason.
+	HostStarved  bool
+	StarveDetail string
 }
 
 // Config bounds and tunes the controller. Floors are the render-drop protection.
@@ -119,6 +136,23 @@ func Decide(s State, cfg Config) Decision {
 	}
 	if s.MSPT <= 0 {
 		return hold("no MSPT reading — holding")
+	}
+
+	// HOST-STARVATION GATE. When the host — not the world — is the bottleneck,
+	// every branch below would act on a lie: the MSPT reading reflects stolen
+	// CPU, not world cost. Cutting distance punishes players without recovering
+	// ticks (this includes the panic valve: 60ms of starved MSPT is still not
+	// the world's fault), and the slow-raise ramp would then take many minutes
+	// to undo the damage after the neighbour leaves. So hold everything and
+	// name the real fix. Trade-off: if the world is ALSO genuinely overloaded
+	// we hold over budget until the pressure lifts — accepted, because under
+	// starvation we cannot tell, and a wrong cut is the harder error to undo.
+	if s.HostStarved {
+		detail := s.StarveDetail
+		if detail == "" {
+			detail = "cgroup pressure/throttling"
+		}
+		return hold(fmt.Sprintf("MSPT %.1f but the HOST is the bottleneck (%s) — distance won't fix that, holding; see `tickwarden host` / `iostorm`", s.MSPT, detail))
 	}
 
 	// SAFETY VALVE. At/over PanicMSPT the server is dropping ticks outright

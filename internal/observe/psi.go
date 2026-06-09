@@ -19,6 +19,7 @@
 package observe
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -45,6 +46,39 @@ type Pressure struct {
 	// in a leaf like /.lxc whose own PSI reads ~0, while the binding pressure
 	// shows up at an ancestor. We scan leaf→root and keep the worst.
 	Source string `json:"source,omitempty"`
+}
+
+// StarvedNow reports whether this pressure snapshot shows ACTIVE host
+// starvation: PSI some-avg10 at/over pct on any resource, or new CPU-quota
+// throttle events since the previous snapshot.
+//
+// It exists for long-running controllers (the daemon's adaptive loop), where
+// Correlate's "NrThrottled > 0" test would be wrong: the counters are
+// cumulative since boot, so a throttle event from last week would read as
+// starved forever. Comparing against prev confines the signal to "throttled
+// since the last poll". For the first poll, pass prev == cur (delta zero) —
+// PSI avg10 alone still detects ongoing pressure. Unreadable PSI is never
+// starvation: we can't attribute, so we don't.
+func StarvedNow(prev, cur Pressure, pct float64) (bool, string) {
+	if !cur.Available {
+		return false, ""
+	}
+
+	worst, worstName := cur.CPU.SomeAvg10, "CPU"
+	if cur.IO.SomeAvg10 > worst {
+		worst, worstName = cur.IO.SomeAvg10, "I/O"
+	}
+	if cur.Memory.SomeAvg10 > worst {
+		worst, worstName = cur.Memory.SomeAvg10, "memory"
+	}
+
+	if pct > 0 && worst >= pct {
+		return true, fmt.Sprintf("%s pressure some-avg10=%.1f%%", worstName, worst)
+	}
+	if cur.NrThrottled > prev.NrThrottled {
+		return true, fmt.Sprintf("CPU quota throttled %d time(s) since last poll", cur.NrThrottled-prev.NrThrottled)
+	}
+	return false, ""
 }
 
 // cgroupLevels lists this process's cgroup-v2 directory and every ancestor up

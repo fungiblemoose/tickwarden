@@ -76,6 +76,15 @@ companion runtime setter  ──►  PlayerManager.setSimulationDistance / setVi
   budget) the controller snaps sim straight to MinSim instead of stepping.
   No K-poll counter needed: MSPT is already a ~5s rolling mean of 100 ticks,
   so a single reading at/over 50ms is sustained overload, not noise.
+- **Host-starvation gate — BUILT.** The controller's open blind spot was that
+  it couldn't tell *why* MSPT was high: a noisy neighbour starving the cgroup
+  produces the same number as a heavy world, but cutting distance only fixes
+  the latter. Each decision now reads cgroup PSI / CPU-throttle deltas
+  (`observe.StarvedNow`, same leaf→root scan as `watch`) and **holds** when the
+  host explains the spike — including suppressing the panic valve — pointing at
+  `tickwarden host`/`iostorm` instead. Throttle counters are compared between
+  polls (they're cumulative since boot, so only deltas mean "now"). Knob:
+  `-starve-psi` / `starve_psi`, default 10% some-avg10, 0 disables.
 - **View is decoupled from sim — BUILT.** View distance costs bandwidth and
   RAM, not tick CPU, so lowering it recovers zero MSPT. The controller never
   lowers view (an operator-set value above MaxView is left alone too); it only

@@ -146,6 +146,37 @@ func TestDecide_PanicSnapsSimToFloor(t *testing.T) {
 	}
 }
 
+// When the host is starving the container, a bad MSPT says nothing about world
+// cost — the controller must hold, not cut, and must say why.
+func TestDecide_HostStarvedHoldsInsteadOfLowering(t *testing.T) {
+	d := Decide(State{Players: 4, MSPT: 48, CurrentSim: 14, CurrentView: 18,
+		HostStarved: true, StarveDetail: "I/O pressure some-avg10=42.0%"}, cfg())
+	if d.Action != ActionHold || d.Sim != 14 {
+		t.Fatalf("starved should hold (not lower), got %s sim=%d", d.Action, d.Sim)
+	}
+	if !strings.Contains(d.Reason, "HOST") || !strings.Contains(d.Reason, "I/O pressure") {
+		t.Fatalf("reason should blame the host and carry the detail: %q", d.Reason)
+	}
+}
+
+// Starvation outranks the panic valve: 60ms of starved MSPT is still not the
+// world's fault, so don't snap to the floor.
+func TestDecide_HostStarvedSuppressesPanic(t *testing.T) {
+	d := Decide(State{Players: 4, MSPT: 60, CurrentSim: 14, CurrentView: 18, HostStarved: true}, cfg())
+	if d.Action != ActionHold || d.Sim != 14 {
+		t.Fatalf("starved must suppress the panic snap, got %s sim=%d", d.Action, d.Sim)
+	}
+}
+
+// Starvation also suppresses raises: a reading taken under pressure is
+// unreliable in both directions.
+func TestDecide_HostStarvedSuppressesRaise(t *testing.T) {
+	d := Decide(State{Players: 1, MSPT: 7, CurrentSim: 10, CurrentView: 14, HostStarved: true}, cfg())
+	if d.Action != ActionHold || d.Sim != 10 {
+		t.Fatalf("starved must not raise either, got %s sim=%d", d.Action, d.Sim)
+	}
+}
+
 // PanicMSPT <= 0 disables the valve: a 55ms reading takes the normal bounded
 // step down instead of snapping to the floor.
 func TestDecide_PanicDisabledStepsNormally(t *testing.T) {

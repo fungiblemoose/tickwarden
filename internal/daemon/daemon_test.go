@@ -107,6 +107,55 @@ func TestStep_SustainedLowRaisesAfterDebounce(t *testing.T) {
 	}
 }
 
+// Host starvation → the controller holds, so even an over-budget MSPT must not
+// trigger an apply; once the pressure lifts, the same MSPT lowers as usual.
+func TestStep_HostStarvedHoldsThenRecovers(t *testing.T) {
+	fa := &fakeApply{}
+	// Same over-budget snapshot as TestStep_HighMSPTLowers...
+	snap := observe.Snapshot{Players: 4, PlayersPeak: 4, MSPT: 48, Sim: 14, View: 18, TPS: 19}
+	l := newLoop(Config{Apply: true}, snap, nil, fa.apply)
+	// ...but the cgroup shows heavy I/O pressure: the host is the bottleneck.
+	starved := true
+	l.deps.Pressure = func() observe.Pressure {
+		p := observe.Pressure{Available: true}
+		if starved {
+			p.IO.SomeAvg10 = 42
+		}
+		return p
+	}
+
+	l.step()
+	if fa.count() != 0 {
+		t.Fatalf("starved over-budget step must hold, got %d applies", fa.count())
+	}
+
+	// Pressure gone → the same MSPT is now the world's fault and lowers.
+	starved = false
+	l.step()
+	if fa.count() != 1 {
+		t.Fatalf("after pressure lifts the lower should apply, got %d applies", fa.count())
+	}
+	if fa.lastSim >= 14 {
+		t.Fatalf("applied sim %d should be lower than current 14", fa.lastSim)
+	}
+}
+
+// A stale cumulative throttle count (from before the daemon started) must not
+// read as starvation: only new events between polls count.
+func TestStep_StaleThrottleCountIsNotStarvation(t *testing.T) {
+	fa := &fakeApply{}
+	snap := observe.Snapshot{Players: 4, PlayersPeak: 4, MSPT: 48, Sim: 14, View: 18, TPS: 19}
+	l := newLoop(Config{Apply: true}, snap, nil, fa.apply)
+	l.deps.Pressure = func() observe.Pressure {
+		return observe.Pressure{Available: true, NrThrottled: 500} // old history, unchanging
+	}
+
+	l.step()
+	if fa.count() != 1 {
+		t.Fatalf("an unchanging throttle counter must not block the lower, got %d applies", fa.count())
+	}
+}
+
 // Dry-run (Apply=false) → an actionable decision is logged but never applied.
 func TestStep_DryRunNeverApplies(t *testing.T) {
 	fa := &fakeApply{}

@@ -194,7 +194,17 @@ sim sheds load. Plus hard floors, fast-down/slow-up ramps, a deadband, a **50ms
 panic valve** (when ticks are actually being dropped, sim snaps straight to the
 floor instead of stepping), and **on-join pre-sizing** — it sizes for your
 expected peak (`players_peak`), so a join finds a peak-safe distance already set
-rather than forcing a drop. Dry-run by default:
+rather than forcing a drop.
+
+It's also **host-aware**, which no in-game distance scaler is: each decision
+reads the container's cgroup PSI and CPU-throttling (the same signals as
+`watch`), and when the *host* — a noisy neighbour, a quota — explains a bad
+MSPT, it holds instead of cutting. An MSPT reading taken under starvation
+measures stolen CPU, not world cost; shrinking the world wouldn't give the
+ticks back, so it points you at `tickwarden host`/`iostorm` instead. Threshold:
+`-starve-psi` / `starve_psi` (PSI some-avg10 %, default 10; 0 disables).
+
+Dry-run by default:
 
 ```sh
 tickwarden adaptive                 # log decisions only (safe to watch)
