@@ -31,8 +31,8 @@ type Config struct {
 	TargetMSPT    float64       // keep MSPT at/under this (ms)
 	MinSim        int           // never drop simulation distance below this
 	MaxSim        int           // never raise simulation distance above this
-	MaxView       int           // cap how high view distance can be raised
-	RaiseDebounce int           // consecutive raise decisions required before raising
+	MaxView        int           // cap how high view distance can be raised
+	RaiseDebounce  int           // consecutive raise decisions required before raising
 	Apply         bool          // actually apply changes (false = dry-run, log only)
 
 	// StarvePSI is the cgroup PSI some-avg10 percentage at/over which a tick
@@ -46,6 +46,14 @@ type Config struct {
 	// rather than the world (see adaptive.State.GCStalled). Needs companion
 	// >= 0.6.0 for /jvm; degrades silently without it. <= 0 disables.
 	GCStallPct float64
+
+	// MemPressurePct is the cgroup memory PSI some-avg10 percentage at/over
+	// which the controller steps view distance down by one to shed chunk load
+	// (see adaptive.State.MemPressured). Unlike the starvation gate (which holds
+	// because the MSPT reading is unreliable), this is an actionable signal:
+	// fewer loaded chunks directly reduces memory use. Fires even during host-
+	// starvation / GC-stall holds. <= 0 disables.
+	MemPressurePct float64
 
 	// UIAddr enables the daemon's web control plane when non-empty (e.g.
 	// "127.0.0.1:9226"): a status dashboard, the decision history, and live
@@ -72,8 +80,9 @@ func DefaultConfig() Config {
 		TargetMSPT:    ac.TargetMSPT,
 		MinSim:        ac.MinSim,
 		MaxSim:        ac.MaxSim,
-		MaxView:       ac.MaxView,
-		RaiseDebounce: 3,
+		MaxView:        ac.MaxView,
+		RaiseDebounce:  3,
+		MemPressurePct: ac.MemPressurePct,
 		Apply:         false,
 		StarvePSI:     observe.DefaultThresholds().PSIPressurePct,
 		GCStallPct:    15, // a 1.5s+ GC slice of a 10s window is collector trouble, not world load
@@ -89,9 +98,10 @@ func (c Config) knobs() Knobs {
 		MinSim:     c.MinSim,
 		MaxSim:     c.MaxSim,
 		MaxView:    c.MaxView,
-		StarvePSI:  c.StarvePSI,
-		GCStallPct: c.GCStallPct,
-		Apply:      c.Apply,
+		StarvePSI:      c.StarvePSI,
+		GCStallPct:     c.GCStallPct,
+		MemPressurePct: c.MemPressurePct,
+		Apply:          c.Apply,
 	}
 }
 
@@ -105,6 +115,7 @@ func adaptiveConfigFor(k Knobs) adaptive.Config {
 	ac.MinSim = k.MinSim
 	ac.MaxSim = k.MaxSim
 	ac.MaxView = k.MaxView
+	ac.MemPressurePct = k.MemPressurePct
 	return ac
 }
 
@@ -304,18 +315,24 @@ func (l *loop) step() {
 		MSPT:        snap.MSPT,
 		CurrentSim:  snap.Sim,
 		CurrentView: snap.View,
+		// HostStarved, GCStalled, MemPressured filled in below.
 	}
-	// Starvation gate: read cgroup pressure and let the controller hold when
-	// the host, not the world, explains a bad MSPT. The first poll compares
-	// the throttle counters against themselves (delta zero) so a cumulative
-	// count from before the daemon started doesn't read as "starved now".
-	if k.StarvePSI > 0 && l.deps.Pressure != nil {
+	// Read cgroup pressure once if either pressure-based gate is active, then
+	// feed each gate from the same snapshot. The starvation gate needs a delta
+	// (throttle counters are cumulative since boot), so we track prevPressure.
+	// The memory gate is point-in-time and needs no delta.
+	if (k.StarvePSI > 0 || k.MemPressurePct > 0) && l.deps.Pressure != nil {
 		cur := l.deps.Pressure()
-		prev := cur
-		if l.prevPressureSet {
-			prev = l.prevPressure
+		if k.StarvePSI > 0 {
+			prev := cur
+			if l.prevPressureSet {
+				prev = l.prevPressure
+			}
+			st.HostStarved, st.StarveDetail = observe.StarvedNow(prev, cur, k.StarvePSI)
 		}
-		st.HostStarved, st.StarveDetail = observe.StarvedNow(prev, cur, k.StarvePSI)
+		if k.MemPressurePct > 0 {
+			st.MemPressured, st.MemDetail = observe.MemPressuredNow(cur, k.MemPressurePct)
+		}
 		l.prevPressure, l.prevPressureSet = cur, true
 	}
 	// GC gate: same delta pattern over the companion's cumulative GC counters.
@@ -344,6 +361,8 @@ func (l *loop) step() {
 		StarveDetail: st.StarveDetail,
 		GCStalled:    st.GCStalled,
 		GCDetail:     st.GCDetail,
+		MemPressured: st.MemPressured,
+		MemDetail:    st.MemDetail,
 		JVM:          jvm,
 		JVMAvailable: jvm.Available,
 	})

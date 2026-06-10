@@ -223,6 +223,22 @@ func parseCPUStat(s string) (nrThrottled, throttledUsec uint64) {
 	return nrThrottled, throttledUsec
 }
 
+// MemPressuredNow reports whether memory PSI some-avg10 is at or over pct,
+// meaning tasks are actively stalling waiting for memory. Unlike StarvedNow
+// (which says the MSPT reading is unreliable), this is an actionable signal:
+// fewer loaded chunks directly reduces memory use, so the right response is to
+// step view distance down rather than hold everything. Returns false when PSI
+// is unavailable or pct <= 0 (disabled).
+func MemPressuredNow(p Pressure, pct float64) (bool, string) {
+	if !p.Available || pct <= 0 {
+		return false, ""
+	}
+	if p.Memory.SomeAvg10 >= pct {
+		return true, fmt.Sprintf("memory PSI some-avg10=%.1f%%", p.Memory.SomeAvg10)
+	}
+	return false, ""
+}
+
 func parseKV(fields []string, key string) float64 {
 	for _, f := range fields {
 		if strings.HasPrefix(f, key+"=") {

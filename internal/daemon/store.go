@@ -14,13 +14,14 @@ import (
 // remains the single durable source of settings, and a runtime tweak is an
 // experiment until the operator writes it there.
 type Knobs struct {
-	TargetMSPT float64 `json:"target_mspt"`
-	MinSim     int     `json:"min_sim"`
-	MaxSim     int     `json:"max_sim"`
-	MaxView    int     `json:"max_view"`
-	StarvePSI  float64 `json:"starve_psi"`
-	GCStallPct float64 `json:"gc_stall_pct"`
-	Apply      bool    `json:"apply"`
+	TargetMSPT     float64 `json:"target_mspt"`
+	MinSim         int     `json:"min_sim"`
+	MaxSim         int     `json:"max_sim"`
+	MaxView        int     `json:"max_view"`
+	StarvePSI      float64 `json:"starve_psi"`
+	GCStallPct     float64 `json:"gc_stall_pct"`
+	MemPressurePct float64 `json:"mem_pressure_pct"`
+	Apply          bool    `json:"apply"`
 }
 
 // Status is the daemon's latest observation set, published by the loop after
@@ -35,6 +36,8 @@ type Status struct {
 	StarveDetail string           `json:"starve_detail,omitempty"`
 	GCStalled    bool             `json:"gc_stalled"`
 	GCDetail     string           `json:"gc_detail,omitempty"`
+	MemPressured bool             `json:"mem_pressured"`
+	MemDetail    string           `json:"mem_detail,omitempty"`
 	JVM          observe.JVMStats `json:"jvm"`
 	JVMAvailable bool             `json:"jvm_available"`
 }

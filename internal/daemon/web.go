@@ -105,13 +105,14 @@ func uiHandler(store *Store, token string, log *slog.Logger) http.Handler {
 		// Partial update: only the fields present in the body change. Pointers
 		// distinguish "absent" from "zero" so {"apply":false} works.
 		var patch struct {
-			TargetMSPT *float64 `json:"target_mspt"`
-			MinSim     *int     `json:"min_sim"`
-			MaxSim     *int     `json:"max_sim"`
-			MaxView    *int     `json:"max_view"`
-			StarvePSI  *float64 `json:"starve_psi"`
-			GCStallPct *float64 `json:"gc_stall_pct"`
-			Apply      *bool    `json:"apply"`
+			TargetMSPT     *float64 `json:"target_mspt"`
+			MinSim         *int     `json:"min_sim"`
+			MaxSim         *int     `json:"max_sim"`
+			MaxView        *int     `json:"max_view"`
+			StarvePSI      *float64 `json:"starve_psi"`
+			GCStallPct     *float64 `json:"gc_stall_pct"`
+			MemPressurePct *float64 `json:"mem_pressure_pct"`
+			Apply          *bool    `json:"apply"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 			http.Error(w, "bad JSON: "+err.Error(), http.StatusBadRequest)
@@ -137,6 +138,9 @@ func uiHandler(store *Store, token string, log *slog.Logger) http.Handler {
 		if patch.GCStallPct != nil {
 			k.GCStallPct = *patch.GCStallPct
 		}
+		if patch.MemPressurePct != nil {
+			k.MemPressurePct = *patch.MemPressurePct
+		}
 		if patch.Apply != nil {
 			k.Apply = *patch.Apply
 		}
@@ -147,7 +151,8 @@ func uiHandler(store *Store, token string, log *slog.Logger) http.Handler {
 		store.SetKnobs(k)
 		log.Info("knobs changed via control plane",
 			"target_mspt", k.TargetMSPT, "min_sim", k.MinSim, "max_sim", k.MaxSim,
-			"max_view", k.MaxView, "starve_psi", k.StarvePSI, "gc_stall_pct", k.GCStallPct, "apply", k.Apply)
+			"max_view", k.MaxView, "starve_psi", k.StarvePSI, "gc_stall_pct", k.GCStallPct,
+			"mem_pressure_pct", k.MemPressurePct, "apply", k.Apply)
 		writeJSON(w, k)
 	})
 
@@ -172,6 +177,9 @@ func validateKnobs(k Knobs) error {
 	}
 	if k.GCStallPct < 0 || k.GCStallPct > 100 {
 		return fmt.Errorf("gc_stall_pct must be in [0, 100], got %v", k.GCStallPct)
+	}
+	if k.MemPressurePct < 0 || k.MemPressurePct > 100 {
+		return fmt.Errorf("mem_pressure_pct must be in [0, 100], got %v", k.MemPressurePct)
 	}
 	return nil
 }
@@ -255,7 +263,7 @@ const controlPageHTML = `<!DOCTYPE html>
   .gate .why { color: var(--muted); font-size: 11px; }
   .bar { height: 10px; background: #0a0d10; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-top: 8px; }
   .bar-fill { height: 100%; width: 0%; background: var(--green); transition: width .4s ease, background .4s ease; }
-  form.knobs { display: grid; grid-template-columns: repeat(6, 1fr) auto; gap: 12px; align-items: end; }
+  form.knobs { display: grid; grid-template-columns: repeat(7, 1fr) auto; gap: 12px; align-items: end; }
   @media (max-width: 760px) { form.knobs { grid-template-columns: 1fr 1fr; } }
   .knob label { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 5px; }
   .knob input { width: 100%; background: #0a0d10; color: var(--text); border: 1px solid var(--line);
@@ -306,6 +314,8 @@ const controlPageHTML = `<!DOCTYPE html>
       <div class="why" id="hostwhy"></div>
       <div class="gate"><span class="ind" id="gcgate">--</span><span>JVM garbage collector</span></div>
       <div class="why" id="gcwhy"></div>
+      <div class="gate"><span class="ind" id="memgate">--</span><span>memory pressure</span></div>
+      <div class="why" id="memwhy"></div>
       <div class="label" style="margin-top:12px">heap</div>
       <div style="font-size:13px"><span id="heap">--</span></div>
       <div class="bar"><div class="bar-fill" id="heapbar"></div></div>
@@ -320,6 +330,7 @@ const controlPageHTML = `<!DOCTYPE html>
         <div class="knob"><label>max view</label><input id="k_maxview" type="number" min="2" max="32"></div>
         <div class="knob"><label>starve psi %</label><input id="k_starve" type="number" step="1" min="0" max="100"></div>
         <div class="knob"><label>gc stall %</label><input id="k_gc" type="number" step="1" min="0" max="100"></div>
+        <div class="knob"><label>mem psi %</label><input id="k_mempsi" type="number" step="1" min="0" max="100"></div>
         <button type="submit">save</button>
       </form>
       <div class="msg" id="knobmsg"></div>
@@ -355,9 +366,9 @@ const controlPageHTML = `<!DOCTYPE html>
     document.getElementById('livetext').textContent = ok ? 'live' : 'no signal';
   }
 
-  function gate(idInd, idWhy, on, why) {
+  function gate(idInd, idWhy, on, why, activeLabel) {
     const ind = document.getElementById(idInd);
-    ind.textContent = on ? 'HOLDING' : 'clear';
+    ind.textContent = on ? (activeLabel || 'HOLDING') : 'clear';
     ind.className = 'ind ' + (on ? 'amber' : 'green');
     document.getElementById(idWhy).textContent = on ? (why || '') : '';
   }
@@ -371,6 +382,7 @@ const controlPageHTML = `<!DOCTYPE html>
     document.getElementById('k_maxview').value = k.max_view;
     document.getElementById('k_starve').value = k.starve_psi;
     document.getElementById('k_gc').value = k.gc_stall_pct;
+    document.getElementById('k_mempsi').value = k.mem_pressure_pct;
     const m = document.getElementById('mode');
     m.textContent = k.apply ? 'APPLY' : 'DRY-RUN';
     m.className = 'mode ' + (k.apply ? 'apply' : 'dry');
@@ -404,6 +416,7 @@ const controlPageHTML = `<!DOCTYPE html>
       max_view: Number(document.getElementById('k_maxview').value),
       starve_psi: Number(document.getElementById('k_starve').value),
       gc_stall_pct: Number(document.getElementById('k_gc').value),
+      mem_pressure_pct: Number(document.getElementById('k_mempsi').value),
     });
     return false;
   }
@@ -432,6 +445,7 @@ const controlPageHTML = `<!DOCTYPE html>
 
       gate('hostgate', 'hostwhy', st.host_starved, st.starve_detail);
       gate('gcgate', 'gcwhy', st.gc_stalled, st.gc_detail);
+      gate('memgate', 'memwhy', st.mem_pressured, st.mem_detail, 'STEPPING VIEW ↓');
 
       const heapEl = document.getElementById('heap');
       const hb = document.getElementById('heapbar');

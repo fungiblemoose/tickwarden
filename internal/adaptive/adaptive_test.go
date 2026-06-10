@@ -203,3 +203,81 @@ func TestDecide_PanicDisabledStepsNormally(t *testing.T) {
 		t.Fatalf("with panic disabled the drop must respect MaxStepDown, got %d", d.Sim)
 	}
 }
+
+// MEMORY GATE TESTS
+
+// When memory is pressured and view is above the sim+buffer floor, view steps
+// down by one and the action becomes lower (even from a hold).
+func TestDecide_MemPressureStepsViewDown(t *testing.T) {
+	// MSPT 32 within band → sim hold. View 20 > floor (12+4=16) → view steps down.
+	d := Decide(State{Players: 3, MSPT: 32, CurrentSim: 12, CurrentView: 20,
+		MemPressured: true, MemDetail: "memory PSI some-avg10=25.0%"}, cfg())
+	if d.Action != ActionLower {
+		t.Fatalf("mem pressure on a hold should become lower, got %s", d.Action)
+	}
+	if d.Sim != 12 {
+		t.Fatalf("mem pressure must not touch sim, got %d", d.Sim)
+	}
+	if d.View != 19 {
+		t.Fatalf("view should step down 20→19, got %d", d.View)
+	}
+	if !strings.Contains(d.Reason, "memory PSI") {
+		t.Fatalf("reason should carry the memory detail: %q", d.Reason)
+	}
+}
+
+// When view is already at the sim+buffer floor, memory pressure does nothing.
+func TestDecide_MemPressureAtFloorNoOp(t *testing.T) {
+	// sim 12, view 16 = 12+4 = floor. Nothing to shed.
+	d := Decide(State{Players: 3, MSPT: 32, CurrentSim: 12, CurrentView: 16,
+		MemPressured: true}, cfg())
+	if d.View != 16 {
+		t.Fatalf("view at floor must not go lower, got %d", d.View)
+	}
+}
+
+// Memory gate fires even during a HostStarved hold — orthogonal signals.
+func TestDecide_MemPressureFiresDuringStarve(t *testing.T) {
+	d := Decide(State{Players: 4, MSPT: 48, CurrentSim: 14, CurrentView: 20,
+		HostStarved: true, StarveDetail: "I/O pressure",
+		MemPressured: true, MemDetail: "memory PSI some-avg10=22.0%"}, cfg())
+	if d.Sim != 14 {
+		t.Fatalf("starvation must still hold sim, got %d", d.Sim)
+	}
+	if d.View != 19 {
+		t.Fatalf("memory gate should step view 20→19 even during starvation hold, got %d", d.View)
+	}
+}
+
+// With MemPressurePct == 0 (disabled), memory pressure is ignored.
+func TestDecide_MemPressureDisabled(t *testing.T) {
+	c := cfg()
+	c.MemPressurePct = 0
+	d := Decide(State{Players: 3, MSPT: 32, CurrentSim: 12, CurrentView: 20,
+		MemPressured: true}, c)
+	if d.View != 20 {
+		t.Fatalf("disabled mem gate must not change view, got %d", d.View)
+	}
+	if d.Action != ActionHold {
+		t.Fatalf("disabled mem gate must not change action, got %s", d.Action)
+	}
+}
+
+// Memory gate appends to the reason when sim is also moving.
+func TestDecide_MemPressureAppendsReasonOnLower(t *testing.T) {
+	// MSPT 48 → lower sim; memory pressured → also step view down.
+	d := Decide(State{Players: 4, MSPT: 48, CurrentSim: 14, CurrentView: 22,
+		MemPressured: true, MemDetail: "memory PSI some-avg10=30.0%"}, cfg())
+	if d.Action != ActionLower {
+		t.Fatalf("over-budget + mem pressure should lower, got %s", d.Action)
+	}
+	if d.Sim >= 14 {
+		t.Fatalf("sim should have lowered, got %d", d.Sim)
+	}
+	if d.View != 21 {
+		t.Fatalf("view should step 22→21, got %d", d.View)
+	}
+	if !strings.Contains(d.Reason, "memory PSI") {
+		t.Fatalf("reason should include mem detail: %q", d.Reason)
+	}
+}
