@@ -17,6 +17,7 @@ type Knobs struct {
 	TargetMSPT float64 `json:"target_mspt"`
 	MinSim     int     `json:"min_sim"`
 	MaxSim     int     `json:"max_sim"`
+	MaxView    int     `json:"max_view"`
 	StarvePSI  float64 `json:"starve_psi"`
 	GCStallPct float64 `json:"gc_stall_pct"`
 	Apply      bool    `json:"apply"`

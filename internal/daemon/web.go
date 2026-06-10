@@ -108,6 +108,7 @@ func uiHandler(store *Store, token string, log *slog.Logger) http.Handler {
 			TargetMSPT *float64 `json:"target_mspt"`
 			MinSim     *int     `json:"min_sim"`
 			MaxSim     *int     `json:"max_sim"`
+			MaxView    *int     `json:"max_view"`
 			StarvePSI  *float64 `json:"starve_psi"`
 			GCStallPct *float64 `json:"gc_stall_pct"`
 			Apply      *bool    `json:"apply"`
@@ -127,6 +128,9 @@ func uiHandler(store *Store, token string, log *slog.Logger) http.Handler {
 		if patch.MaxSim != nil {
 			k.MaxSim = *patch.MaxSim
 		}
+		if patch.MaxView != nil {
+			k.MaxView = *patch.MaxView
+		}
 		if patch.StarvePSI != nil {
 			k.StarvePSI = *patch.StarvePSI
 		}
@@ -143,7 +147,7 @@ func uiHandler(store *Store, token string, log *slog.Logger) http.Handler {
 		store.SetKnobs(k)
 		log.Info("knobs changed via control plane",
 			"target_mspt", k.TargetMSPT, "min_sim", k.MinSim, "max_sim", k.MaxSim,
-			"starve_psi", k.StarvePSI, "gc_stall_pct", k.GCStallPct, "apply", k.Apply)
+			"max_view", k.MaxView, "starve_psi", k.StarvePSI, "gc_stall_pct", k.GCStallPct, "apply", k.Apply)
 		writeJSON(w, k)
 	})
 
@@ -159,6 +163,9 @@ func validateKnobs(k Knobs) error {
 	}
 	if k.MinSim < 2 || k.MaxSim > 32 || k.MinSim > k.MaxSim {
 		return fmt.Errorf("sim bounds must satisfy 2 <= min_sim <= max_sim <= 32, got [%d, %d]", k.MinSim, k.MaxSim)
+	}
+	if k.MaxView < 2 || k.MaxView > 32 {
+		return fmt.Errorf("max_view must be in [2, 32], got %d", k.MaxView)
 	}
 	if k.StarvePSI < 0 || k.StarvePSI > 100 {
 		return fmt.Errorf("starve_psi must be in [0, 100], got %v", k.StarvePSI)
@@ -248,7 +255,7 @@ const controlPageHTML = `<!DOCTYPE html>
   .gate .why { color: var(--muted); font-size: 11px; }
   .bar { height: 10px; background: #0a0d10; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-top: 8px; }
   .bar-fill { height: 100%; width: 0%; background: var(--green); transition: width .4s ease, background .4s ease; }
-  form.knobs { display: grid; grid-template-columns: repeat(5, 1fr) auto; gap: 12px; align-items: end; }
+  form.knobs { display: grid; grid-template-columns: repeat(6, 1fr) auto; gap: 12px; align-items: end; }
   @media (max-width: 760px) { form.knobs { grid-template-columns: 1fr 1fr; } }
   .knob label { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 5px; }
   .knob input { width: 100%; background: #0a0d10; color: var(--text); border: 1px solid var(--line);
@@ -310,6 +317,7 @@ const controlPageHTML = `<!DOCTYPE html>
         <div class="knob"><label>target mspt</label><input id="k_target" type="number" step="0.5" min="1" max="50"></div>
         <div class="knob"><label>min sim</label><input id="k_minsim" type="number" min="2" max="32"></div>
         <div class="knob"><label>max sim</label><input id="k_maxsim" type="number" min="2" max="32"></div>
+        <div class="knob"><label>max view</label><input id="k_maxview" type="number" min="2" max="32"></div>
         <div class="knob"><label>starve psi %</label><input id="k_starve" type="number" step="1" min="0" max="100"></div>
         <div class="knob"><label>gc stall %</label><input id="k_gc" type="number" step="1" min="0" max="100"></div>
         <button type="submit">save</button>
@@ -360,6 +368,7 @@ const controlPageHTML = `<!DOCTYPE html>
     document.getElementById('k_target').value = k.target_mspt;
     document.getElementById('k_minsim').value = k.min_sim;
     document.getElementById('k_maxsim').value = k.max_sim;
+    document.getElementById('k_maxview').value = k.max_view;
     document.getElementById('k_starve').value = k.starve_psi;
     document.getElementById('k_gc').value = k.gc_stall_pct;
     const m = document.getElementById('mode');
@@ -392,6 +401,7 @@ const controlPageHTML = `<!DOCTYPE html>
       target_mspt: Number(document.getElementById('k_target').value),
       min_sim: Number(document.getElementById('k_minsim').value),
       max_sim: Number(document.getElementById('k_maxsim').value),
+      max_view: Number(document.getElementById('k_maxview').value),
       starve_psi: Number(document.getElementById('k_starve').value),
       gc_stall_pct: Number(document.getElementById('k_gc').value),
     });

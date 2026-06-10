@@ -31,6 +31,7 @@ type Config struct {
 	TargetMSPT    float64       // keep MSPT at/under this (ms)
 	MinSim        int           // never drop simulation distance below this
 	MaxSim        int           // never raise simulation distance above this
+	MaxView       int           // cap how high view distance can be raised
 	RaiseDebounce int           // consecutive raise decisions required before raising
 	Apply         bool          // actually apply changes (false = dry-run, log only)
 
@@ -71,6 +72,7 @@ func DefaultConfig() Config {
 		TargetMSPT:    ac.TargetMSPT,
 		MinSim:        ac.MinSim,
 		MaxSim:        ac.MaxSim,
+		MaxView:       ac.MaxView,
 		RaiseDebounce: 3,
 		Apply:         false,
 		StarvePSI:     observe.DefaultThresholds().PSIPressurePct,
@@ -86,6 +88,7 @@ func (c Config) knobs() Knobs {
 		TargetMSPT: c.TargetMSPT,
 		MinSim:     c.MinSim,
 		MaxSim:     c.MaxSim,
+		MaxView:    c.MaxView,
 		StarvePSI:  c.StarvePSI,
 		GCStallPct: c.GCStallPct,
 		Apply:      c.Apply,
@@ -101,6 +104,7 @@ func adaptiveConfigFor(k Knobs) adaptive.Config {
 	ac.TargetMSPT = k.TargetMSPT
 	ac.MinSim = k.MinSim
 	ac.MaxSim = k.MaxSim
+	ac.MaxView = k.MaxView
 	return ac
 }
 
