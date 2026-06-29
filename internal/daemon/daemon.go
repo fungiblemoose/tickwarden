@@ -60,8 +60,8 @@ type Config struct {
 	// knob changes. Empty (the default) serves nothing. A non-loopback bind
 	// is refused unless UIToken is set.
 	UIAddr string
-	// UIToken, when set, is required on every UI/API request (X-Tickwarden-Token
-	// header or ?token= query parameter).
+	// UIToken, when set, is required on every UI/API request via the
+	// X-Tickwarden-Token request header.
 	UIToken string
 
 	// StatusEvery is how often a heartbeat status line is emitted regardless of

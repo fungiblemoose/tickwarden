@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -21,9 +23,12 @@ import (
 // The companion's own page stays a read-only status display.
 //
 // Security posture: off by default (empty UIAddr). Loopback binds need no
-// auth, matching the companion. A non-loopback bind is REFUSED unless a token
-// is set, because /api/config changes a live game server. Settings changed
-// here are runtime-only — tickwarden.toml remains the durable source.
+// token, matching the companion, but are still defended: the Host header is
+// pinned to the loopback bind (DNS-rebinding defense) and every mutating call
+// must carry the custom X-Tickwarden-Token header (CSRF defense — a simple
+// cross-site request can't set it). A non-loopback bind is REFUSED unless a
+// token is set, because /api/config changes a live game server. Settings
+// changed here are runtime-only — tickwarden.toml remains the durable source.
 
 // serveUI validates the bind address and starts the control plane in a
 // goroutine that shuts down with ctx. Returns an error only for
@@ -39,7 +44,7 @@ func serveUI(ctx context.Context, cfg Config, store *Store, log *slog.Logger) er
 
 	srv := &http.Server{
 		Addr:              cfg.UIAddr,
-		Handler:           uiHandler(store, cfg.UIToken, log),
+		Handler:           requireHost(cfg.UIAddr, uiHandler(store, cfg.UIToken, log)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	ln, err := net.Listen("tcp", cfg.UIAddr)
@@ -72,6 +77,27 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// requireHost pins the Host header to the loopback bind — a DNS-rebinding
+// defense. A malicious page can point its own domain at 127.0.0.1, but the
+// browser still sends that domain in Host, so requiring a loopback Host with
+// the bound port blocks it while still allowing both "localhost" and
+// "127.0.0.1". A deliberately public bind is token-guarded and reachable under
+// many names, so Host pinning only applies to the loopback default.
+func requireHost(addr string, next http.Handler) http.Handler {
+	bindHost, bindPort, err := net.SplitHostPort(addr)
+	if err != nil || !isLoopbackHost(bindHost) {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqHost, reqPort, err := net.SplitHostPort(r.Host)
+		if err != nil || reqPort != bindPort || !isLoopbackHost(reqHost) {
+			http.Error(w, "bad Host header", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // uiHandler builds the control plane's routes. Exported-ish seam (used by
 // tests via httptest) — everything it needs comes in as arguments.
 func uiHandler(store *Store, token string, log *slog.Logger) http.Handler {
@@ -100,6 +126,19 @@ func uiHandler(store *Store, token string, log *slog.Logger) http.Handler {
 	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		// CSRF defense, enforced even on a tokenless loopback bind: a custom
+		// header that a simple cross-site form/img/script request cannot set
+		// must be present, and the body must be JSON (not a form post). When a
+		// token is configured, requireToken has already checked this header's
+		// value; here we only insist that mutations carry it.
+		if mt, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); strings.TrimSpace(mt) != "application/json" {
+			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+			return
+		}
+		if r.Header.Get("X-Tickwarden-Token") == "" {
+			http.Error(w, "missing X-Tickwarden-Token header", http.StatusForbidden)
 			return
 		}
 		// Partial update: only the fields present in the body change. Pointers
@@ -185,18 +224,17 @@ func validateKnobs(k Knobs) error {
 }
 
 // requireToken wraps a handler with token auth. Empty token = no auth (the
-// loopback default). The token rides in X-Tickwarden-Token or ?token= so both
-// fetch() and a plain browser visit can present it.
+// loopback default). The token rides ONLY in the X-Tickwarden-Token header —
+// never the URL query string, which leaks into history, logs, and Referer.
+// The comparison is constant-time to avoid leaking the token byte by byte.
 func requireToken(token string, next http.Handler) http.Handler {
 	if token == "" {
 		return next
 	}
+	want := []byte(token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := r.Header.Get("X-Tickwarden-Token")
-		if got == "" {
-			got = r.URL.Query().Get("token")
-		}
-		if got != token {
+		got := []byte(r.Header.Get("X-Tickwarden-Token"))
+		if subtle.ConstantTimeCompare(got, want) != 1 {
 			http.Error(w, "missing or wrong token", http.StatusUnauthorized)
 			return
 		}
@@ -350,10 +388,26 @@ const controlPageHTML = `<!DOCTYPE html>
 
 <script>
   const POLL_MS = 2000;
-  // When the daemon runs with a token, the operator opens /?token=...; carry it
-  // on every API call so the page keeps working behind the auth wrapper.
-  const TOKEN = new URLSearchParams(location.search).get('token');
-  const api = (path, opts) => fetch(TOKEN ? path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : path, opts);
+  // The operator may open /?token=... ONCE; we lift it into sessionStorage and
+  // scrub it from the URL so it never lingers in history, logs, or Referer.
+  // From then on the token rides in the X-Tickwarden-Token request header.
+  (function () {
+    const u = new URLSearchParams(location.search).get('token');
+    if (u) {
+      sessionStorage.setItem('tw_token', u);
+      history.replaceState(null, '', location.pathname);
+    }
+  })();
+  const TOKEN = sessionStorage.getItem('tw_token') || '';
+  // X-Tickwarden-Token doubles as the CSRF marker: the daemon requires this
+  // custom header on every mutation even when no token is set, so always send
+  // it (a non-empty sentinel when running tokenless on loopback).
+  const api = (path, opts) => {
+    opts = opts || {};
+    const headers = new Headers(opts.headers || {});
+    headers.set('X-Tickwarden-Token', TOKEN || 'loopback');
+    return fetch(path, Object.assign({}, opts, { headers }));
+  };
   const fmt = (n, d) => (n === null || n === undefined || Number.isNaN(n)) ? '--' : Number(n).toFixed(d);
   const gib = (b) => (b / 1073741824).toFixed(2) + ' GiB';
   let knobsDirty = false;   // don't clobber the form while the operator types
@@ -398,7 +452,7 @@ const controlPageHTML = `<!DOCTYPE html>
   async function post(body) {
     const msg = document.getElementById('knobmsg');
     try {
-      const res = await api('/api/config', { method: 'POST', body: JSON.stringify(body) });
+      const res = await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (!res.ok) { msg.textContent = await res.text(); msg.className = 'msg red'; return; }
       fillKnobs(await res.json());
       msg.textContent = 'saved — takes effect on the next decision';

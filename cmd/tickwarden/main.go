@@ -987,7 +987,7 @@ func cmdDaemon(args []string) {
 	starvePSI := fs.Float64("starve-psi", d.StarvePSI, "cgroup PSI some-avg10 (%) at/over which a dip is the host's fault and distance is held (0 disables)")
 	gcStall := fs.Float64("gc-stall-pct", d.GCStallPct, "share of the poll window (%) the JVM's GC must eat for a dip to be the collector's fault (needs companion >= 0.6.0; 0 disables)")
 	uiAddr := fs.String("ui", d.UIAddr, "serve the web control plane on this address (e.g. 127.0.0.1:9226; empty disables; non-loopback needs -ui-token)")
-	uiToken := fs.String("ui-token", d.UIToken, "require this token on every control-plane request (X-Tickwarden-Token header or ?token=)")
+	uiToken := fs.String("ui-token", d.UIToken, "require this token on every control-plane request (sent in the X-Tickwarden-Token header)")
 	doApply := fs.Bool("apply", false, "actually apply changes (default is dry-run: log only)")
 	fs.Parse(args)
 
