@@ -49,19 +49,41 @@ func TestUI_ConfigPatchAndValidation(t *testing.T) {
 	srv := httptest.NewServer(uiHandler(store, "", testLogger()))
 	defer srv.Close()
 
+	// postConfig mutates through the hardened path: JSON Content-Type plus the
+	// X-Tickwarden-Token CSRF header, which is required even on a tokenless
+	// loopback bind.
+	postConfig := func(body string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest("POST", srv.URL+"/api/config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Tickwarden-Token", "loopback")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /api/config: %v", err)
+		}
+		return resp
+	}
+
 	// Partial patch: only target_mspt changes, everything else keeps its value.
-	resp, err := http.Post(srv.URL+"/api/config", "application/json", strings.NewReader(`{"target_mspt": 30}`))
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("valid patch should succeed: %v status=%v", err, resp.StatusCode)
+	resp := postConfig(`{"target_mspt": 30}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("valid patch should succeed: status=%v", resp.StatusCode)
 	}
 	resp.Body.Close()
 	if k := store.Knobs(); k.TargetMSPT != 30 || k.MinSim != 6 {
 		t.Fatalf("patch should change only target_mspt, got %+v", k)
 	}
 
+	// A mutation without the CSRF header is refused even on loopback.
+	noCSRF, _ := http.Post(srv.URL+"/api/config", "application/json", strings.NewReader(`{"target_mspt": 25}`))
+	if noCSRF.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing CSRF header should 403, got %v", noCSRF.StatusCode)
+	}
+	noCSRF.Body.Close()
+
 	// min_sim > max_sim must be rejected and leave the knobs untouched.
-	resp, err = http.Post(srv.URL+"/api/config", "application/json", strings.NewReader(`{"min_sim": 20, "max_sim": 8}`))
-	if err != nil || resp.StatusCode != http.StatusBadRequest {
+	resp = postConfig(`{"min_sim": 20, "max_sim": 8}`)
+	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid bounds should 400, got %v", resp.StatusCode)
 	}
 	resp.Body.Close()
@@ -88,9 +110,10 @@ func TestUI_TokenAuth(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	// The URL query string is no longer accepted — header only.
 	resp, _ = http.Get(srv.URL + "/api/status?token=s3cret")
-	if resp.StatusCode != 200 {
-		t.Fatalf("query token should pass, got %v", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("query token must be rejected, got %v", resp.StatusCode)
 	}
 	resp.Body.Close()
 
